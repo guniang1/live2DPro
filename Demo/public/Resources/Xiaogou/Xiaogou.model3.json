@@ -1,0 +1,588 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "Xiaogou.moc3",
+		"Textures": [
+			"Xiaogou.8192/texture_00.png"
+		],
+		"Physics": "Xiaogou.physics3.json",
+		"DisplayInfo": "Xiaogou.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "脱外套",
+				"File": "expressions/脱外套.exp3.json"
+			},
+			{
+				"Name": "舞台吉他",
+				"File": "expressions/舞台吉他.exp3.json"
+			},
+			{
+				"Name": "毛线帽子",
+				"File": "expressions/毛线帽子.exp3.json"
+			},
+			{
+				"Name": "鸭舌帽子",
+				"File": "expressions/鸭舌帽子.exp3.json"
+			},
+			{
+				"Name": "狗狗垂耳",
+				"File": "expressions/狗狗垂耳.exp3.json"
+			},
+			{
+				"Name": "狗狗立耳",
+				"File": "expressions/狗狗立耳.exp3.json"
+			},
+			{
+				"Name": "舞台掀刘海",
+				"File": "expressions/舞台掀刘海.exp3.json"
+			},
+			{
+				"Name": "耶耶喝水",
+				"File": "expressions/耶耶喝水.exp3.json"
+			},
+			{
+				"Name": "备用表情9",
+				"File": "expressions/备用表情9.exp3.json"
+			},
+			{
+				"Name": "耶耶扑克",
+				"File": "expressions/耶耶扑克.exp3.json"
+			},
+			{
+				"Name": "打游戏动作",
+				"File": "expressions/打游戏动作.exp3.json"
+			},
+			{
+				"Name": "舞台麦克风",
+				"File": "expressions/舞台麦克风.exp3.json"
+			},
+			{
+				"Name": "星星眼",
+				"File": "expressions/星星眼.exp3.json"
+			},
+			{
+				"Name": "眼镜切换",
+				"File": "expressions/眼镜切换.exp3.json"
+			},
+			{
+				"Name": "生气符号",
+				"File": "expressions/生气符号.exp3.json"
+			},
+			{
+				"Name": "唱歌耳麦",
+				"File": "expressions/唱歌耳麦.exp3.json"
+			},
+			{
+				"Name": "眯眼害羞脸",
+				"File": "expressions/眯眼害羞脸.exp3.json"
+			},
+			{
+				"Name": "闭眼",
+				"File": "expressions/闭眼.exp3.json"
+			},
+			{
+				"Name": "爱心眼吐舌",
+				"File": "expressions/爱心眼吐舌.exp3.json"
+			},
+			{
+				"Name": "哭哭脸",
+				"File": "expressions/哭哭脸.exp3.json"
+			},
+			{
+				"Name": "鼓嘴赌气",
+				"File": "expressions/鼓嘴赌气.exp3.json"
+			},
+			{
+				"Name": "耶耶水壶背带切换",
+				"File": "expressions/耶耶水壶背带切换.exp3.json"
+			},
+			{
+				"Name": "【动作预设】帅气舞台",
+				"File": "expressions/【动作预设】帅气舞台.exp3.json"
+			},
+			{
+				"Name": "【表情预设】生气",
+				"File": "expressions/【表情预设】生气.exp3.json"
+			}
+		]
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"ParamMouthOpenY"
+			]
+		}
+	],
+	"HitAreas": [
+		{
+			"Id": "ArtMesh0",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh1",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh2",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh3",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh4",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh5",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh6",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh7",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh8",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh9",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh10",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh11",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh12",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh13",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh14",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh15",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh16",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh17",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh18",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh19",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh20",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh21",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh22",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh23",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh24",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh25",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh26",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh27",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh28",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh29",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh30",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh31",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh32",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh33",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh34",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh35",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh38",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh39",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh40",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh41",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh42",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh43",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh44",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh45",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh46",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh47",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh48",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh49",
+			"Name": "Head"
+		},
+		{
+			"Id": "ArtMesh50",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh51",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh52",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh53",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh54",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh55",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh56",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh57",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh58",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh59",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh60",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh61",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh62",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh63",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh64",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh65",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh66",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh67",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh68",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh69",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh71",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh72",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh73",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh74",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh75",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh76",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh77",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh78",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh79",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh80",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh81",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh82",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh83",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh84",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh85",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh86",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh87",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh88",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh89",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh90",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh92",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh93",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh94",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh95",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh96",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh97",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh98",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh99",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh100",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh101",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh102",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh103",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh104",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh105",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh107",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh108",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh109",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh110",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh111",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh112",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh113",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh114",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh115",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh116",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh117",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh118",
+			"Name": "Body"
+		},
+		{
+			"Id": "ArtMesh119",
+			"Name": "Body"
+		}
+	]
+}

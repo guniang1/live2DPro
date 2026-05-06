@@ -1,0 +1,4 @@
+pymysql>=1.1.0
+redis>=5.0.0
+minio>=7.2.0
+python-multipart>=0.0.26

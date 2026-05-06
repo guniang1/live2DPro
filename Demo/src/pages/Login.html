@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>登录 - Live2D Demo</title>
+  <style>
+    :root {
+      color-scheme: light;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+      background: radial-gradient(circle at top, #eef4ff 0%, #dbe8ff 40%, #c7dcff 100%);
+      display: grid;
+      place-items: center;
+      color: #1c2c45;
+    }
+
+    .card {
+      width: min(92vw, 460px);
+      padding: 28px 24px 24px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid rgba(123, 152, 205, 0.35);
+      box-shadow: 0 16px 32px rgba(35, 77, 138, 0.16);
+      backdrop-filter: blur(6px);
+    }
+
+    .title {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 700;
+      color: #18325b;
+    }
+
+    .sub {
+      margin: 10px 0 20px;
+      color: #4a5d80;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .field {
+      margin-bottom: 14px;
+    }
+
+    .label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 13px;
+      color: #37517b;
+    }
+
+    .input {
+      width: 100%;
+      height: 42px;
+      border: 1px solid #b7caec;
+      border-radius: 10px;
+      padding: 0 12px;
+      font-size: 14px;
+      outline: none;
+      background: #fff;
+      color: #1c2c45;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .input:focus {
+      border-color: #5e8ddc;
+      box-shadow: 0 0 0 3px rgba(94, 141, 220, 0.2);
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .btn {
+      flex: 1;
+      height: 42px;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      transition: transform 0.08s ease, filter 0.15s ease;
+    }
+
+    .btn:active {
+      transform: translateY(1px);
+    }
+
+    .btn-primary {
+      color: #fff;
+      background: linear-gradient(135deg, #4f80d6 0%, #2f5cb8 100%);
+      box-shadow: 0 8px 18px rgba(44, 87, 168, 0.24);
+    }
+
+    .btn-secondary {
+      color: #2a4f8d;
+      background: #ecf3ff;
+      border: 1px solid #c6d8fa;
+    }
+
+    .btn[disabled] {
+      cursor: not-allowed;
+      filter: grayscale(0.25);
+      opacity: 0.7;
+    }
+
+    .status {
+      margin-top: 14px;
+      min-height: 22px;
+      font-size: 13px;
+      line-height: 1.5;
+      color: #2e4f8f;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .status.error {
+      color: #b11d39;
+    }
+
+    .status.ok {
+      color: #0c7a4d;
+    }
+
+    .footer {
+      margin-top: 16px;
+      font-size: 12px;
+      color: #5a6f95;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1 class="title">登录 Live2D Demo</h1>
+    <p class="sub">
+      首次登录会通过 HTTP 调用后端创建用户身份，并把登录信息保存到浏览器本地。
+    </p>
+
+    <form id="login-form">
+      <div class="field">
+        <label class="label" for="api-base">后端 API 地址</label>
+        <input class="input" id="api-base" name="apiBase" type="url" value="http://localhost:8000" required>
+      </div>
+
+      <div class="field">
+        <label class="label" for="username">用户名（唯一）</label>
+        <input class="input" id="username" name="username" type="text" maxlength="50" placeholder="请输入用户名" required>
+      </div>
+
+      <div class="field">
+        <label class="label" for="password">密码</label>
+        <input class="input" id="password" name="password" type="password" maxlength="100" placeholder="请输入密码" required>
+      </div>
+
+      <div class="field">
+        <label class="label" for="nickname">昵称（可选）</label>
+        <input class="input" id="nickname" name="nickname" type="text" maxlength="50" placeholder="请输入昵称">
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-primary" id="submit-btn" type="submit">创建身份并登录</button>
+        <button class="btn btn-secondary" id="go-main-btn" type="button">直接进入主页面</button>
+      </div>
+    </form>
+
+    <div id="status" class="status"></div>
+    <div class="footer">登录成功后会跳转到 <code>../index.html</code></div>
+  </main>
+
+  <script>
+    (function () {
+      const form = document.getElementById("login-form");
+      const submitBtn = document.getElementById("submit-btn");
+      const goMainBtn = document.getElementById("go-main-btn");
+      const statusEl = document.getElementById("status");
+      const apiBaseInput = document.getElementById("api-base");
+      const defaultMainPath = "../index.html";
+    //   window.location.search 获取当前页面的URL参数
+      const params = new URLSearchParams(window.location.search);
+      const redirectPath = params.get("redirect") || defaultMainPath;
+
+      function normalizeBase(base) {
+        return String(base || "").trim().replace(/\/+$/, "");
+      }
+
+      function toWsBase(httpBase) {
+        if (/^https:\/\//i.test(httpBase)) return httpBase.replace(/^https/i, "wss");
+        if (/^http:\/\//i.test(httpBase)) return httpBase.replace(/^http/i, "ws");
+        return httpBase;
+      }
+
+      function setStatus(text, type) {
+        statusEl.textContent = text;
+        statusEl.classList.remove("error", "ok");
+        if (type) {
+          statusEl.classList.add(type);
+        }
+      }
+
+      function setLoading(loading) {
+        submitBtn.disabled = loading;
+        goMainBtn.disabled = loading;
+      }
+
+      function persistLogin(payload) {
+        const httpBase = normalizeBase(payload.apiBase);
+        const wsBase = toWsBase(httpBase);
+        const user = payload.user;
+        const wrappedResponse = payload.wrappedResponse || null;
+        localStorage.setItem("live2d_info", JSON.stringify({
+          httpBase: httpBase,
+          wsBase: wsBase,
+          user_id: user.user_id,
+          username: user.username,
+          nickname: user.nickname || "",
+          login_at: Date.now()
+        }));
+        if (wrappedResponse) {
+          // 保存后端统一响应原文，便于前端调试/回放
+          localStorage.setItem("live2d_last_api_response", JSON.stringify(wrappedResponse));
+        }
+      }
+
+
+    //   ==========创建用户==============
+    // 返回统一响应体
+    // {
+    //   "code": 0,
+    //   "message": "ok",
+    //   "data": {
+    //     "user_id": 1,
+    //     "username": "test",
+    //     "nickname": "test",
+    //     "status": 1
+    //   }
+    // }
+      async function createUserByHttp(apiBase, username, password, nickname) {
+        const body = {
+          username,
+          password,
+          nickname: nickname || null,
+          status: 1
+        };
+        const url = `${apiBase}/api/users`;
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json().catch(() => ({}));
+
+        // ==========解析响应体==============
+        if (!res.ok) {
+            // 1、如果响应不成功，则抛出错误
+          const detail = typeof data?.message === "string"
+            ? data.message
+            : (typeof data?.detail === "string" ? data.detail : JSON.stringify(data || {}));
+          throw new Error(`创建身份失败（${res.status}）：${detail}`);
+        }
+
+        // 2、检查响应体是否符合约定
+        if (typeof data?.code !== "number") {
+          throw new Error("响应格式错误：缺少 code 字段");
+        }
+
+        // 3、检查响应体是否成功
+        if (data.code !== 0) {
+          throw new Error(data?.message || `创建身份失败（code=${data.code}）`);
+        }
+
+        // 4、检查响应体是否包含用户对象
+        if (!data?.data || typeof data.data !== "object") {
+          throw new Error("响应格式错误：缺少 data 用户对象");
+        }
+
+        // 5、返回响应体
+        return data;
+      }
+
+
+      // ==========跳转到主页面==============
+      function goMain() {
+        window.location.href = redirectPath;
+      }
+
+      const savedBase = localStorage.getItem("live2d_api_base");
+      if (savedBase) {
+        apiBaseInput.value = savedBase;
+      }
+
+      const rawAuth = localStorage.getItem("live2d_info");
+      try {
+        const savedAuth = rawAuth ? JSON.parse(rawAuth) : null;
+        if (savedAuth && savedAuth.user_id && savedAuth.username) {
+          setStatus("检测到已登录身份，正在进入主页面...", "ok");
+          setTimeout(goMain, 200);
+          return;
+        }
+      } catch (e) {
+        // 本地缓存损坏时忽略，继续展示登录表单
+      }
+
+      goMainBtn.addEventListener("click", goMain);
+
+      form.addEventListener("submit", async function (e) {
+        e.preventDefault();
+        const formData = new FormData(form);
+        const apiBase = normalizeBase(formData.get("apiBase"));
+        const username = String(formData.get("username") || "").trim();
+        const password = String(formData.get("password") || "").trim();
+        const nickname = String(formData.get("nickname") || "").trim();
+
+        if (!apiBase || !username || !password) {
+          setStatus("请填写 API 地址、用户名和密码。", "error");
+          return;
+        }
+
+        setLoading(true);
+        setStatus("正在创建用户身份并登录...", "");
+
+        try {
+        // 获取统一响应体
+          const wrapped = await createUserByHttp(apiBase, username, password, nickname);
+
+        //   获取响应体{code,message,data}中的data用户对象
+          const user = wrapped.data;
+
+        //   保存登录信息
+          persistLogin({ apiBase, user, wrappedResponse: wrapped });
+          setStatus(`登录成功，用户ID：${user.user_id}，即将跳转主页面。`, "ok");
+          setTimeout(goMain, 500);
+        } catch (err) {
+          setStatus(err?.message || "登录失败，请检查后端服务与参数。", "error");
+        } finally {
+          setLoading(false);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

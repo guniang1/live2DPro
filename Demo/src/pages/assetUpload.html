@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- 云端部署：填写后端 HTTP 根地址（无路径），例 https://your-host:8000；留空则用 localhost:8000 -->
+    <meta name="live2d-api-origin" content="">
+    <title>Live2D 模型资源管理</title>
+    <style>
+        #back-btn {
+            position: fixed;
+            top: 22px;
+            left: 22px;
+            height: 44px;
+            padding: 0 20px;
+            border: 1px solid rgba(255, 255, 255, 0.35);
+            border-radius: 22px;
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            background: linear-gradient(145deg, #4a5568, #2d3548);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+            z-index: 100;
+        }
+        #back-btn:hover {
+            filter: brightness(1.1);
+        }
+
+        .upload-container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        .upload-container h2 {
+            color: #333;
+            margin-bottom: 24px;
+            font-size: 24px;
+            border-bottom: 2px solid #4a90d9;
+            padding-bottom: 10px;
+        }
+
+        .page-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 16px;
+        }
+
+        .switch-page-btn {
+            height: 38px;
+            padding: 0 16px;
+            border: none;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            background: linear-gradient(135deg, #6f42c1 0%, #5a32a3 100%);
+        }
+
+        .upload-container h3 {
+            color: #444;
+            margin-bottom: 16px;
+            font-size: 18px;
+        }
+
+        .upload-section {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 24px;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+            font-size: 14px;
+        }
+
+        .form-group input[type="text"] {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s ease;
+            box-sizing: border-box;
+        }
+
+        .form-group input[type="text"]:focus {
+            outline: none;
+            border-color: #4a90d9;
+        }
+
+        .form-group input[type="file"] {
+            display: none;
+        }
+
+        .form-group input[type="file"] + label {
+            display: inline-block;
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #4a90d9 0%, #357abd 100%);
+            color: white;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            margin-bottom: 8px;
+        }
+
+        .form-group input[type="file"] + label:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 16px rgba(74, 144, 217, 0.4);
+        }
+
+        .file-info {
+            display: block;
+            font-size: 13px;
+            color: #666;
+            font-style: italic;
+        }
+
+        .upload-btn {
+            width: 100%;
+            padding: 14px 24px;
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .upload-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 16px rgba(40, 167, 69, 0.4);
+        }
+
+        .upload-btn:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+
+        .status-message {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            display: none;
+        }
+
+        .status-message.status-info {
+            display: block;
+            background: #d1ecf1;
+            color: #0c637f;
+        }
+
+        .status-message.status-success {
+            display: block;
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-message.status-error {
+            display: block;
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .assets-section {
+            background: #fff;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+        }
+
+        .packages-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .package-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border: 1px solid #e0e0e0;
+            transition: box-shadow 0.2s ease;
+        }
+
+        .package-item:hover {
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .package-info {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .package-name {
+            font-weight: 600;
+            color: #333;
+            font-size: 15px;
+        }
+
+        .package-stats {
+            font-size: 13px;
+            color: #666;
+        }
+
+        .delete-btn {
+            padding: 8px 16px;
+            background: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+
+        .delete-btn:hover {
+            background: #c82333;
+        }
+
+        .empty-message {
+            text-align: center;
+            color: #999;
+            padding: 20px;
+            font-style: italic;
+        }
+
+        .btn-spinner {
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <button id="back-btn">返回主页</button>
+        <div id="uploaderContainer"></div>
+    </div>
+
+    <script>
+        (function () {
+            var m = document.querySelector('meta[name="live2d-api-origin"]');
+            var o = (m && m.content && String(m.content).trim())
+                ? String(m.content).trim().replace(/\/$/, "")
+                : "http://localhost:8000";
+            window.__LIVE2D_API_BASE__ = o + "/api";
+        })();
+        const API_BASE = window.__LIVE2D_API_BASE__;
+
+        async function uploadLive2dModelZip(userId, packageKey, zipFile) {
+            if (!userId || !zipFile) {
+                throw new Error("缺少必要参数");
+            }
+            
+            const formData = new FormData();
+            formData.append("user_id", userId.toString());
+            if (packageKey && packageKey.trim()) {
+                formData.append("package_key", packageKey.trim());
+            }
+            formData.append("model_zip", zipFile);
+            
+            const response = await fetch(`${API_BASE}/live2d-model-assets/upload-zip`, {
+                method: "POST",
+                body: formData,
+            });
+            
+            const result = await response.json();
+            
+            if (result.code !== 0) {
+                throw new Error(result.message || "上传失败");
+            }
+            
+            return result.data;
+        }
+
+        async function getModelPackages(userId) {
+            const url = `${API_BASE}/live2d-model-assets/packages?user_id=${userId}`;
+            
+            const response = await fetch(url);
+            const result = await response.json();
+            
+            if (result.code !== 0) {
+                throw new Error(result.message || "获取模型包列表失败");
+            }
+            
+            return result.data;
+        }
+
+        async function deleteModelPackage(userId, packageKey) {
+            const response = await fetch(
+                `${API_BASE}/live2d-model-assets/by-package/${encodeURIComponent(packageKey)}?user_id=${userId}`,
+                {
+                    method: "DELETE",
+                }
+            );
+            
+            const result = await response.json();
+            
+            if (result.code !== 0) {
+                throw new Error(result.message || "删除失败");
+            }
+            
+            return result.data;
+        }
+
+        class Live2dAssetUploader {
+            constructor(containerId, userId = 1) {
+                this.container = document.getElementById(containerId);
+                this.userId = userId;
+                this.uploading = false;
+                this.init();
+            }
+
+            init() {
+                this.container.innerHTML = `
+                    <div class="upload-container">
+                        <h2>Live2D 模型资源上传</h2>
+                        <div class="page-actions" style="flex-wrap: wrap; gap: 10px;">
+                            <button id="toCharacterDefBtn" class="switch-page-btn" style="background: linear-gradient(135deg, #2e9e6f 0%, #248760 100%);">模型角色定义</button>
+                            <button id="toTtsUploadBtn" class="switch-page-btn">前往音色资源上传</button>
+                        </div>
+                        
+                        <div class="upload-section">
+                            <div class="form-group">
+                                <label for="packageKey">模型包名称（可选）</label>
+                                <input 
+                                    type="text" 
+                                    id="packageKey" 
+                                    placeholder="如：Xiaozi，不传则从文件名推断"
+                                />
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="zipFile">选择 Live2D 模型 ZIP 文件</label>
+                                <input 
+                                    type="file" 
+                                    id="zipFile" 
+                                    accept=".zip"
+                                />
+                                <span class="file-info">未选择文件</span>
+                            </div>
+                            
+                            <button id="uploadBtn" class="upload-btn">
+                                <span class="btn-text">上传并生成索引</span>
+                                <span class="btn-spinner" style="display: none;">上传中...</span>
+                            </button>
+                        </div>
+                        
+                        <div class="status-message" id="statusMessage"></div>
+                        
+                        <div class="assets-section">
+                            <h3>已上传的模型包</h3>
+                            <div id="packagesList" class="packages-list"></div>
+                        </div>
+                    </div>
+                `;
+
+                this.setupEventListeners();
+                this.loadPackages();
+            }
+
+            setupEventListeners() {
+                const uploadBtn = this.container.querySelector("#uploadBtn");
+                uploadBtn.addEventListener("click", () => this.handleUpload());
+
+                const toTtsUploadBtn = this.container.querySelector("#toTtsUploadBtn");
+                if (toTtsUploadBtn) {
+                    toTtsUploadBtn.addEventListener("click", () => {
+                        location.href = "./ttsUpload.html";
+                    });
+                }
+                const toCharacterDefBtn = this.container.querySelector("#toCharacterDefBtn");
+                if (toCharacterDefBtn) {
+                    toCharacterDefBtn.addEventListener("click", () => {
+                        location.href = "./characterDef.html";
+                    });
+                }
+
+                const zipFile = this.container.querySelector("#zipFile");
+                zipFile.addEventListener("change", (e) => {
+                    const fileInfo = this.container.querySelector(".file-info");
+                    fileInfo.textContent = e.target.files[0]?.name || "未选择文件";
+                });
+            }
+
+            async handleUpload() {
+                const packageKey = this.container.querySelector("#packageKey").value;
+                const zipFileInput = this.container.querySelector("#zipFile");
+                const zipFile = zipFileInput.files[0];
+                
+                if (!zipFile) {
+                    this.showStatus("请选择一个 ZIP 文件", "error");
+                    return;
+                }
+
+                if (this.uploading) {
+                    return;
+                }
+
+                this.uploading = true;
+                const uploadBtn = this.container.querySelector("#uploadBtn");
+                const btnText = uploadBtn.querySelector(".btn-text");
+                const spinner = uploadBtn.querySelector(".btn-spinner");
+                
+                btnText.style.display = "none";
+                spinner.style.display = "inline";
+
+                try {
+                    this.showStatus("正在上传...", "info");
+                    
+                    const result = await uploadLive2dModelZip(this.userId, packageKey, zipFile);
+                    
+                    this.showStatus(
+                        `上传成功！包名: ${result.package_key}，导入 ${result.inserted_rows} 个文件`,
+                        "success"
+                    );
+                    
+                    zipFileInput.value = "";
+                    this.container.querySelector(".file-info").textContent = "未选择文件";
+                    this.container.querySelector("#packageKey").value = "";
+                    
+                    await this.loadPackages();
+                } catch (error) {
+                    this.showStatus(error.message, "error");
+                } finally {
+                    this.uploading = false;
+                    btnText.style.display = "inline";
+                    spinner.style.display = "none";
+                }
+            }
+
+            async loadPackages() {
+                try {
+                    const packages = await getModelPackages(this.userId);
+
+                    const list = this.container.querySelector("#packagesList");
+                    
+                    if (packages.length === 0) {
+                        list.innerHTML = "<p class='empty-message'>暂无已上传的模型包</p>";
+                        return;
+                    }
+
+                    list.innerHTML = packages
+                        .map(pkg => `
+                            <div class="package-item">
+                                <div class="package-info">
+                                    <span class="package-name">${pkg.package_key}</span>
+                                    <span class="package-stats">
+                                        ${pkg.file_count} 个文件 · ${pkg.asset_types.join(", ")}
+                                        ${pkg.has_entry_model ? " · ✓ 包含入口模型" : ""}
+                                        ${pkg.has_tts_refer ? " · ✓ 已配置参考音频" : ""}
+                                    </span>
+                                </div>
+                                <button 
+                                    class="delete-btn" 
+                                    onclick="window.assetUploader.deletePackage('${pkg.package_key}')"
+                                >
+                                    删除
+                                </button>
+                            </div>
+                        `)
+                        .join("");
+                } catch (error) {
+                    this.showStatus("加载模型包列表失败: " + error.message, "error");
+                }
+            }
+
+            async deletePackage(packageKey) {
+                if (!confirm(`确定要删除模型包 "${packageKey}" 吗？此操作不可撤销。`)) {
+                    return;
+                }
+
+                try {
+                    await deleteModelPackage(this.userId, packageKey);
+                    this.showStatus(`已删除模型包: ${packageKey}`, "success");
+                    await this.loadPackages();
+                } catch (error) {
+                    this.showStatus("删除失败: " + error.message, "error");
+                }
+            }
+
+            showStatus(message, type = "info") {
+                const statusEl = this.container.querySelector("#statusMessage");
+                statusEl.textContent = message;
+                statusEl.className = `status-message status-${type}`;
+                
+                setTimeout(() => {
+                    statusEl.textContent = "";
+                    statusEl.className = "status-message";
+                }, 5000);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            window.assetUploader = new Live2dAssetUploader('uploaderContainer', 1);
+            
+            const backBtn = document.getElementById('back-btn');
+            if (backBtn) {
+                backBtn.addEventListener('click', () => {
+                    location.href = '../../index.html';
+                });
+            }
+        });
+    </script>
+</body>
+</html>

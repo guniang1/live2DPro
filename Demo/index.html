@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#ddd9d4">
+  <title>Live2D · 小陪伴</title>
+  <style>
+    :root {
+      --chat-width: min(40vw, 420px);
+      --bg-deep: #d8d4cf;
+      --bg-panel: rgba(228, 224, 218, 0.94);
+      --bg-panel-solid: #e2ded8;
+      --border-subtle: rgba(70, 65, 60, 0.1);
+      --border-glow: rgba(140, 120, 110, 0.22);
+      --text-primary: #5a5550;
+      --text-muted: rgba(90, 85, 80, 0.48);
+      --accent: #b8a090;
+      --accent-2: #a89888;
+      --accent-soft: rgba(120, 105, 95, 0.14);
+      --user-bubble: #e0dbd6;
+      --ai-bubble: #d8d4de;
+      --radius-lg: 18px;
+      --radius-md: 14px;
+      --shadow-panel: 0 0 0 1px var(--border-subtle), 0 12px 28px rgba(40, 38, 36, 0.06);
+      --font: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      overflow: hidden;
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      font-family: var(--font);
+      background: var(--bg-deep);
+      color: var(--text-primary);
+    }
+
+    html {
+      overscroll-behavior-x: none;
+      touch-action: none;
+    }
+
+    body {
+      position: relative;
+      background:
+        radial-gradient(ellipse 100% 70% at 12% 8%, rgba(200, 175, 160, 0.22), transparent 55%),
+        radial-gradient(ellipse 90% 55% at 88% 18%, rgba(175, 168, 185, 0.16), transparent 50%),
+        linear-gradient(168deg, #e0dcd6 0%, #d8d4cf 42%, #d2cec8 100%);
+    }
+
+    #app-layout {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 50;
+    }
+
+    #chat-panel {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: var(--chat-width);
+      height: 100vh;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      pointer-events: auto;
+      background: var(--bg-panel);
+      backdrop-filter: blur(14px) saturate(0.92);
+      -webkit-backdrop-filter: blur(14px) saturate(0.92);
+      border-right: 1px solid var(--border-subtle);
+      box-shadow: var(--shadow-panel);
+    }
+
+    #chat-header {
+      flex-shrink: 0;
+      padding: 20px 20px 16px;
+      font-size: 15px;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+      color: var(--text-primary);
+      border-bottom: 1px solid var(--border-subtle);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.2) 0%, transparent 100%);
+    }
+
+    #chat-header::before {
+      content: "";
+      display: block;
+      width: 36px;
+      height: 2px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, var(--accent-2), transparent);
+      margin-bottom: 10px;
+      opacity: 0.75;
+    }
+
+    #chat-list {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 18px 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      scroll-behavior: smooth;
+    }
+
+    #chat-list::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    #chat-list::-webkit-scrollbar-thumb {
+      background: rgba(100, 95, 90, 0.2);
+      border-radius: 10px;
+    }
+
+    #chat-list::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    #chat-input-bar {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 16px 18px;
+      border-top: 1px solid var(--border-subtle);
+      background: linear-gradient(0deg, rgba(218, 214, 208, 0.9) 0%, rgba(228, 224, 218, 0.4) 100%);
+    }
+
+    #chat-input {
+      flex: 1;
+      min-width: 0;
+      height: 48px;
+      padding: 0 18px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 999px;
+      outline: none;
+      font-size: 15px;
+      color: var(--text-primary);
+      background: rgba(236, 232, 228, 0.92);
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    #chat-input::placeholder {
+      color: var(--text-muted);
+    }
+
+    #chat-input:focus {
+      border-color: rgba(110, 100, 95, 0.28);
+      box-shadow: 0 0 0 2px var(--accent-soft);
+    }
+
+    #send-btn {
+      height: 48px;
+      padding: 0 22px;
+      border: 1px solid rgba(90, 85, 80, 0.12);
+      border-radius: 999px;
+      color: #4d4844;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      background: linear-gradient(145deg, #d4cec8 0%, #c8c0b8 100%);
+      box-shadow: 0 2px 8px rgba(40, 38, 36, 0.06);
+      transition: transform 0.15s ease, filter 0.15s ease, box-shadow 0.2s;
+    }
+
+    #send-btn:hover {
+      filter: brightness(1.03);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(40, 38, 36, 0.08);
+    }
+
+    #send-btn:active {
+      transform: translateY(0);
+    }
+
+    .chat-item {
+      max-width: 88%;
+      padding: 12px 14px;
+      border-radius: var(--radius-md);
+      font-size: 14px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+      box-shadow: 0 1px 4px rgba(40, 38, 36, 0.04);
+    }
+
+    .chat-item.user {
+      align-self: flex-end;
+      color: #524c48;
+      background: var(--user-bubble);
+      border: 1px solid rgba(90, 85, 80, 0.08);
+      border-bottom-right-radius: 6px;
+    }
+
+    .chat-item.ai {
+      align-self: flex-start;
+      color: #524c50;
+      background: var(--ai-bubble);
+      border: 1px solid rgba(90, 85, 95, 0.1);
+      border-bottom-left-radius: 6px;
+      box-shadow: 0 1px 6px rgba(40, 38, 45, 0.05);
+    }
+
+    #live2d-panel {
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: calc(100vw - var(--chat-width));
+      height: 100vh;
+      height: 100dvh;
+      pointer-events: none;
+    }
+
+    body > canvas {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: calc(100vw - var(--chat-width)) !important;
+      height: 100vh !important;
+      height: 100dvh !important;
+      z-index: 1;
+    }
+
+    #live2d-toolbar {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      display: flex;
+      flex-direction: row;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 8px;
+      border-radius: 999px;
+      background: rgba(220, 216, 210, 0.88);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--border-subtle);
+      box-shadow: 0 6px 18px rgba(40, 38, 36, 0.06);
+      pointer-events: auto;
+      z-index: 100;
+    }
+
+    #toolbar-gear-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      order: 2;
+      width: 46px;
+      height: 46px;
+      padding: 0;
+      border: 1px solid var(--border-subtle);
+      border-radius: 50%;
+      color: #5a5550;
+      cursor: pointer;
+      flex-shrink: 0;
+      background: linear-gradient(145deg, #e8e4df 0%, #dcd8d2 100%);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+      transition: transform 0.2s ease, border-color 0.2s, box-shadow 0.2s;
+    }
+
+    #toolbar-gear-btn:hover {
+      border-color: rgba(90, 85, 80, 0.15);
+      box-shadow: 0 0 0 2px var(--accent-soft);
+    }
+
+    #toolbar-gear-btn img {
+      width: 22px;
+      height: 22px;
+      display: block;
+      pointer-events: none;
+      opacity: 0.72;
+      transition: transform 0.28s ease;
+    }
+
+    #live2d-toolbar.is-expanded #toolbar-gear-btn img {
+      transform: rotate(90deg);
+    }
+
+    #toolbar-expand {
+      display: none;
+      order: 1;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+      min-width: 0;
+      padding: 6px 4px 4px;
+    }
+
+    #live2d-toolbar.is-expanded #toolbar-expand {
+      display: flex;
+    }
+
+    #live2d-toolbar.is-expanded {
+      border-radius: 22px;
+      align-items: stretch;
+    }
+
+    #model-next-btn,
+    #bg-next-btn,
+    #upload-model-btn,
+    #upload-tts-btn,
+    #upload-character-btn,
+    #logout-btn {
+      height: 38px;
+      padding: 0 14px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 999px;
+      color: var(--text-primary);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      background: rgba(236, 232, 228, 0.85);
+      transition: background 0.2s, border-color 0.2s, transform 0.15s;
+      white-space: nowrap;
+    }
+
+    #model-next-btn:hover,
+    #bg-next-btn:hover,
+    #upload-model-btn:hover,
+    #upload-tts-btn:hover,
+    #upload-character-btn:hover {
+      background: rgba(210, 206, 200, 0.95);
+      border-color: rgba(90, 85, 80, 0.12);
+    }
+
+    #logout-btn {
+      background: rgba(212, 200, 200, 0.75);
+      border-color: rgba(120, 95, 95, 0.18);
+      color: #6a5050;
+    }
+
+    #logout-btn:hover {
+      background: rgba(205, 192, 192, 0.88);
+    }
+
+    #live2d-toolbar #model-status,
+    #live2d-toolbar #bg-status {
+      max-width: 160px;
+      padding: 0 6px 2px;
+      color: var(--text-muted);
+      font-size: 11px;
+      line-height: 1.4;
+      word-break: break-all;
+    }
+
+    #record-ui {
+      position: fixed;
+      right: max(18px, env(safe-area-inset-right));
+      bottom: max(20px, env(safe-area-inset-bottom));
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px 10px 12px;
+      border-radius: 999px;
+      background: rgba(220, 216, 210, 0.9);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--border-subtle);
+      box-shadow: 0 8px 22px rgba(40, 38, 36, 0.07);
+      pointer-events: auto;
+      z-index: 100;
+    }
+
+    #record-btn {
+      width: 52px;
+      height: 52px;
+      border: none;
+      border-radius: 50%;
+      font-size: 22px;
+      line-height: 1;
+      color: #f5f3f0;
+      cursor: pointer;
+      background: linear-gradient(145deg, #b0a8a4 0%, #9a928e 100%);
+      box-shadow: 0 3px 12px rgba(40, 38, 36, 0.12);
+      transition: transform 0.15s ease, box-shadow 0.2s;
+    }
+
+    #record-btn:hover {
+      transform: scale(1.03);
+      box-shadow: 0 4px 14px rgba(40, 38, 36, 0.14);
+    }
+
+    #record-btn:active {
+      transform: scale(0.98);
+    }
+
+    #record-status {
+      max-width: 220px;
+      color: var(--text-muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    @media (max-width: 720px) {
+      :root {
+        --chat-width: min(92vw, 340px);
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div id="app-layout">
+    <aside id="chat-panel">
+      <div id="live2d-toolbar">
+        <button type="button" id="toolbar-gear-btn" aria-label="展开工具" aria-expanded="false" title="小工具">
+          <img src="/Resources/icon_gear.png" alt="" width="22" height="22">
+        </button>
+        <div id="toolbar-expand">
+          <button type="button" id="model-next-btn">切换模型</button>
+          <span id="model-status"></span>
+          <button type="button" id="bg-next-btn">切换背景</button>
+          <span id="bg-status"></span>
+          <button type="button" id="upload-model-btn">上传模型</button>
+          <button type="button" id="upload-tts-btn">上传音色</button>
+          <button type="button" id="upload-character-btn">角色定义</button>
+          <button type="button" id="logout-btn">退出登录</button>
+        </div>
+      </div>
+      <div id="chat-header">和 Ta 聊聊天</div>
+      <div id="chat-list" role="log" aria-live="polite" aria-relevant="additions"></div>
+      <div id="chat-input-bar">
+        <input id="chat-input" type="text" placeholder="想说的话，写在这里…" autocomplete="off" enterkeyhint="send">
+        <button type="button" id="send-btn">发送</button>
+      </div>
+    </aside>
+    <main id="live2d-panel"></main>
+  </div>
+
+  <div id="record-ui">
+    <button type="button" id="record-btn" aria-label="语音输入">🎤</button>
+    <span id="record-status">点一下，用声音聊～</span>
+  </div>
+
+  <script>
+    (function () {
+      const raw = localStorage.getItem("live2d_info");
+      let auth = null;
+      try {
+        auth = raw ? JSON.parse(raw) : null;
+      } catch (e) {
+        auth = null;
+      }
+      const isLoggedIn = Boolean(auth && auth.user_id && auth.username);
+      if (!isLoggedIn) {
+        const redirect = `${location.pathname}${location.search}${location.hash}`;
+        const loginUrl = `./src/pages/Login.html?redirect=${encodeURIComponent(redirect)}`;
+        location.replace(loginUrl);
+      }
+    })();
+
+    document.addEventListener("DOMContentLoaded", function () {
+      const logoutBtn = document.getElementById("logout-btn");
+      if (logoutBtn) {
+        logoutBtn.addEventListener("click", function () {
+          localStorage.removeItem("live2d_info");
+          location.replace("./src/pages/Login.html");
+        });
+      }
+    });
+  </script>
+
+  <script src="./dist/Core/live2dcubismcore.js"></script>
+  <script src="./src/main.js" type="module"></script>
+</body>
+
+</html>

@@ -1,0 +1,654 @@
+% !TEX program = xelatex
+% ---------------------------------------------------------------------------
+% 与北京语言大学本科生论文结构的对照说明（完整条文见 docs/ 下同名校验文件）：
+% - docs/_thesis_ref_北京语言大学本科生毕业论文（设计）写作规范.txt
+%   组成顺序：封面→题名页→原创声明→中英文摘要→目录→引言→正文→结论→参考文献→附录→致谢。
+%   参考文献须另起一页；附录置于参考文献之后；致谢在最后。
+% - docs/_thesis_ref_1-本科生毕业论文模版.txt
+%   引言宜含：目的与范围、价值与意义、文献综述、理论依据与实验条件、拟解决问题、论文章节安排。
+% - docs/_thesis_ref_2-论文排版注意事项.txt
+%   页眉自正文起；目录与摘要罗马数字页码；正文页脚「第X页共Y页」等以 base.cls / 学校 Word 模版为准。
+% 提交前请用学校最终 Word/PDF 要求核对 base.cls 是否与上述细则完全一致。
+% 一致性：正文功能描述与仓库实现、表中数字保持一致；未落地能力勿写成已完成；
+% 引用文献结论须与本文系统实际能力区分。
+% ---------------------------------------------------------------------------
+\documentclass{base}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\DeclareGraphicsExtensions{.png,.pdf,.jpg,.jpeg}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,calc,fit}
+\usepackage[sort&compress]{gbt7714}
+% caption 包在校验「按浮动类型预设的 \captionsetup[table]」时，若与 base.cls 组合可能误报 Unused；
+% 仅过滤该条，不影响其它 caption 警告。
+\usepackage{silence}
+\WarningFilter{caption}{Unused}
+% ====================================================
+% 1. 填写论文信息
+% 自动应用于所有封面、摘要页
+% ====================================================
+\title{情感交互Live2D数字人系统设计}
+\entitle{Design and Implementation of a Live2D Digital Avatar System from an Affective Interaction Perspective}
+\author{钟文源}
+\enauthor{Wenyuan Zhong}
+\stunum{202211690474}
+\grade{2022级}
+\college{信息科学学院}
+\encollege{School of Information Science}
+\major{人工智能}
+\instructor{汪柳萍}
+\eninstructor{Liuping Wang}
+\degreetitle{Bachelor of~Engineering}
+
+\date{二〇二六}{六}{2026}
+
+% ====================================================
+% 2. 开始文档
+% ====================================================
+\begin{document}
+
+% ====================================================
+% 2.1 生成封面：外封、中文内封、英文内封、声明页
+% cls 文件会自动处理
+% ====================================================
+\maketitle
+
+% ====================================================
+% 2.2 目录
+% cls 文件会自动处理页码和格式
+% ====================================================
+\tableofcontents
+
+% ====================================================
+% 2.3 中文摘要
+% ====================================================
+\begin{cnabstract}
+随着高校心理健康教育需求的提升与虚拟数字人技术的普及，传统纯文本对话系统缺乏情感反馈、Live2D演示工程缺乏完整后端支撑的问题日益突出。本文面向高校课程演示与学生低压力情感交互练习场景，设计并实现了一套基于浏览器的、须登录使用的Live2D数字人Web系统，核心解决``形象驱动、语音播报、会话及记忆数据可追溯''三大核心需求，以工程可复现仓库形式交付，明确不用于医疗或心理咨询，不替代专业人员服务。
+
+系统采用B/S架构，前端基于Vite与Live2D Cubism Web构建，负责角色渲染、交互操作及私有资源预签名加载；用户可通过键盘输入文本或语音输入，语音经WebSocket接口对接云端DashScope Fun-ASR完成识别，最终与文本输入汇合后通过对话WebSocket接口上行至服务端。服务端以FastAPI为核心，采用Ollama双模型分工模式，分别实现聊天内容流式生成与角色表情、动作的结构化决策；语音合成默认采用云端小米MiMo服务，同时保留本地GPT-SoVITS切换路径。数据持久化层由MySQL九张核心表、Redis分层缓存及MinIO对象存储构成，其中MySQL负责结构化业务数据存储，Redis承载瞬时、短期与长期记忆的分层管理，MinIO用于存储Live2D模型等大文件资源；服务端通过61条REST路由提供统一接口，响应格式规范为\texttt{code/message/data}。
+
+开发环境下，系统主链路已联调贯通，可稳定实现登录、文本与语音对话、Live2D模型切换、历史会话拉取及模型资源入库等核心功能。记忆分层设计借鉴阿特金森--谢弗林多层存储思路与MemGPT核心思想，由服务端统一编排记忆的读写时机，实现会话数据的有效沉淀与复用。需要说明的是，合成时延等性能指标仅基于开发环境小样本非正式观测，不构成严格实验结论，未附原始采样数据；主动关怀相关的数据结构与接口已完成设计，但定时推送至浏览器会话的闭环功能仍未完整实现，正文与结论中已如实界定。
+
+    \cnkeywords{情感交互；虚拟数字人；Live2D；FastAPI；Ollama；分层记忆；WebSocket}
+\end{cnabstract}
+
+% ====================================================
+% 2.4 英文摘要
+% ====================================================
+\begin{enabstract}
+With the increasing demand for mental health education in universities and the popularization of virtual digital human technology, the problems that traditional pure text dialogue systems lack emotional feedback and Live2D demonstration projects lack complete back-end support have become increasingly prominent. Targeting the scenarios of college course demonstrations and students' low-pressure emotional interaction practice, this thesis designs and implements a browser-based Live2D digital avatar Web system that requires login. It focuses on solving three core needs: image-driven interaction, voice broadcast, and traceable session and memory data. The system is delivered as a reproducible engineering repository and is clearly not used for medical or psychological counseling, nor does it replace the services of professional personnel.
+
+The system adopts a B/S architecture. The front-end is built based on Vite and Live2D Cubism Web, responsible for character rendering, interactive operations, and presigned loading of private resources. Users can input text via keyboard or voice; the voice is recognized by connecting to the cloud DashScope Fun-ASR through a WebSocket interface, and finally converges with text input to be uploaded to the server through a dialogue WebSocket interface. The server takes FastAPI as the core and adopts a dual Ollama model division mode, realizing streaming generation of chat content and structured decision-making of character expressions and movements respectively. Speech synthesis defaults to the cloud Xiaomi MiMo service, while retaining the local GPT-SoVITS switching path. The data persistence layer consists of nine core MySQL tables, Redis hierarchical cache, and MinIO object storage. MySQL is responsible for storing structured business data, Redis carries the hierarchical management of instant, short-term and long-term memory, and MinIO is used for storing large file resources such as Live2D models. The server provides a unified interface through 61 REST routes, with a standardized response format of \texttt{code/message/data}.
+
+In the development environment, the main link of the system has been connected and debugged, which can stably realize core functions such as login, text and voice dialogue, Live2D model switching, historical session retrieval, and model resource warehousing. The hierarchical memory design draws on the Atkinson--Shiffrin multi-store model and the core idea of MemGPT, with the server uniformly arranging the reading and writing timing of memory to achieve effective precipitation and reuse of session data. It should be noted that performance indicators such as synthesis latency are only based on informal observations of small samples in the development environment, which do not constitute strict experimental conclusions, and no original sampling data is attached. The data structure and interface related to proactive care have been designed, but the closed-loop function of timed push to browser sessions has not yet been fully realized, which has been clearly defined in the main text and conclusion.
+
+    \enkeywords{affective interaction; digital human; Live2D; FastAPI; Ollama; layered memory; WebSocket}
+\end{enabstract}
+
+% ====================================================
+% 2.5 正文开始
+% cls 会自动从这里开始计算阿拉伯数字页码 1
+% ====================================================
+
+\clearpage             % 确保新的一页开始
+\mainbodytrue          % 激活正文开关；章节首页页眉页脚随之正确
+\pagenumbering{arabic}  % 将页码设置为阿拉伯数字，并从 1 开始
+\pagestyle{mainstyle}   % 将后续所有页面的样式设置为正文样式
+
+% ====================================================
+% 第一章 引言
+% ====================================================
+\chapter{引言}
+
+\section{研究背景与意义}
+
+\subsection{研究背景}
+我国高校心理健康工作受到政策持续推动，教育部等部门的专项行动计划强调完善心理健康教育与咨询服务体系\cite{MOE2023}；国民心理健康发展报告等亦从群体调查角度呈现青年阶段情绪与压力管理需求\cite{NMHReport2023}。世界卫生组织对精神卫生服务的倡导则提示：可扩展、可触达的支持形式有助于弥补专业资源地区与时段不均\cite{WHO2022}。需要强调的是：\textbf{数字人陪伴系统不能替代专业心理干预}，但在``日常情绪表达、低压力对话、习惯化自我梳理''等边界内，具有可验证的工程价值\cite{Picard1997,Bickmore2005}。
+
+与上述需求相对照，\textbf{通用大模型聊天页}往往停留在``纯文本 + 单轮/弱连续''；以 Character.AI、Replika 等为代表的\textbf{商业情感陪伴应用}体验完整但可复现性弱、难与课程设计深度结合\cite{CharacterAIAbout,ReplikaOfficial}；\textbf{大量 Live2D 示例工程}又常止步于资源展示，缺少与 LLM、TTS、账户体系、资源治理一体的可扩展后端\cite{live2d}。因此，有必要在 Web 端构建一条\textbf{可运行、可迭代、可追溯验证}的完整链路，使``看得见形象、听得到声音、对得上话、存得下会话与记忆''同屏实现。
+
+\subsection{研究意义与差异化定位}
+本文意义不在于提出全新生成模型，而在于\textbf{面向可控教学/研究场景}，给出可交付的系统化集成。\textbf{其一}，浏览器侧以\textbf{对话 WebSocket 接口}（\texttt{/ws/chat}）合并下行文本与朗读 WAV，语音输入另经 \texttt{/ws/asr} 上行，职责分离且连接数可控。\textbf{其二}，Ollama \textbf{双模型分工}将``说话内容''与``表情/动作资源 ID''解耦，便于分别调参与排错。\textbf{其三}，数据层以 \textbf{9 张 MySQL 表、Redis 分层记忆与 MinIO 资源索引}支撑会话沉淀与后续策略扩展，相对``仅有前端 Demo''的工程形态形成\textbf{可对照的差异}。
+
+\subsection{研究目的、范围、理论依据与实验条件}
+\textbf{目的与范围：}在浏览器内交付一套可运行的 Live2D 数字人 Web 系统，覆盖登录与会话、文本与语音对话、流式文本与音频下发、模型与资源管理、分层记忆持久化等教学演示与研究原型所需能力；明确不覆盖医疗诊断、心理咨询资质替代及原生客户端开发。
+
+\textbf{理论意义与实用价值：}在情感人机交互与对话系统工程维度，将``形象反馈—语音—多轮上下文—记忆分层''置于同一可复现仓库中，便于对照课堂实验与后续扩展；在应用侧服务于高校学生低压力陪伴练习与数字人集成实践，契合心理健康教育与信息技术交叉场景的讨论需求，但不替代专业干预。
+
+\textbf{理论依据与实验条件：}对话与 Agent 相关讨论以现有大模型与工具学习文献为参照；记忆分层在工程上与经典多层存储模型及 MemGPT 类体系作类比说明\cite{MemGPT2023}。实验与联调环境为常见 x86 开发机，依赖现代浏览器、FastAPI 宿主、Ollama 推理服务、可配置的 TTS 与 ASR 密钥、以及 MySQL、Redis、MinIO 等按文档部署的存储服务；与性能相关的表述仅基于开发环境下的非正式观测，不作严格控制实验宣称。
+
+\textbf{拟解决问题：}缓解通用聊天页缺乏同步形象与语音反馈、示例工程缺乏账户与资源治理后端等问题，并在可控前提下完成双模型驱动与分层记忆的工程落地。
+
+\subsection{本文工作与章节映射}
+图~\ref{fig:layer_arch}给出由浏览器、应用服务、模型与媒体至持久化的\textbf{四层逻辑架构}。后续章节安排：第二章压缩综述相关技术与\textbf{选型对比}；第三章需求、总体设计与\textbf{分层记忆}重点论述；第四章按``前端 / WebSocket / 服务端编排 / 持久化与 API''四块给出实现；第五章总结与创新点、不足与未来工作。
+
+\begin{figure}[htbp]
+    \centering
+    \begin{tikzpicture}[
+        font=\small,
+        layerbox/.style={rectangle, draw=black!70, thick, minimum width=13.8cm, inner sep=8pt, align=left},
+        lbl/.style={font=\bfseries},
+        cmp/.style={rectangle, draw=black!55, rounded corners=2pt, minimum height=0.65cm, inner sep=4pt, align=center},
+    ]
+        \node[layerbox, fill=gray!8] (L1) {\textbf{浏览器层}\\[-1pt]
+            \begin{tabular}{@{}p{12.8cm}@{}}
+            \tikz[baseline=-0.5ex]{\node[cmp]{SPA Shell / Vite};}\quad
+            \tikz[baseline=-0.5ex]{\node[cmp]{Live2D Cubism};}\quad
+            \tikz[baseline=-0.5ex]{\node[cmp]{ws.js / REST 客户端};}\quad
+            \tikz[baseline=-0.5ex]{\node[cmp]{录音与 ASR 适配};}\\[-2pt]
+            {\footnotesize 职责：渲染、交互、WebSocket/HTTP、麦克风 PCM 上行至 \texttt{/ws/asr}}
+            \end{tabular}};
+        \node[layerbox, fill=blue!4, below=0.35cm of L1.south west, anchor=north west] (L2) {\textbf{应用服务层}\\[-1pt]
+            \begin{tabular}{@{}p{12.8cm}@{}}
+            \tikz[baseline=-0.5ex]{\node[cmp]{FastAPI 宿主};}\quad
+            \tikz[baseline=-0.5ex]{\node[cmp,align=center]{对话接口\\[-2pt]\footnotesize\texttt{/ws/chat}};}\quad
+            \tikz[baseline=-0.5ex]{\node[cmp]{\texttt{/ws/asr}};}\quad
+            \tikz[baseline=-0.5ex]{\node[cmp]{REST \texttt{/api/*}};}\quad
+            \tikz[baseline=-0.5ex]{\node[cmp]{长期记忆后台任务};}\\[-2pt]
+            {\footnotesize 职责：鉴权外 HTTP API；对话与朗读经对话 WebSocket（\texttt{/ws/chat}）；ASR；定时固化 \texttt{long\_memory.period\_overview}}
+            \end{tabular}};
+        \node[layerbox, fill=green!5, below=0.35cm of L2.south west, anchor=north west] (L3) {\textbf{模型与媒体服务层}\\[-1pt]
+            \begin{tabular}{@{}p{12.8cm}@{}}
+            \tikz[baseline=-0.5ex]{\node[cmp]{Ollama 双模型};}\quad
+            \tikz[baseline=-0.5ex]{\node[cmp]{TTS：MiMo（云端）/ GPT-SoVITS（本地）};}\quad
+            \tikz[baseline=-0.5ex]{\node[cmp]{DashScope ASR};}\quad
+            \tikz[baseline=-0.5ex]{\node[cmp]{ffmpeg 转码};}\\[-2pt]
+            {\footnotesize 职责：推理与合成；密钥与算力多部署于本地或云端，由配置切换}
+            \end{tabular}};
+        \node[layerbox, fill=orange!6, below=0.35cm of L3.south west, anchor=north west] (L4) {\textbf{数据持久化层}\\[-1pt]
+            \begin{tabular}{@{}p{12.8cm}@{}}
+            \tikz[baseline=-0.5ex]{\node[cmp]{MySQL 九表};}\quad
+            \tikz[baseline=-0.5ex]{\node[cmp]{Redis List/String};}\quad
+            \tikz[baseline=-0.5ex]{\node[cmp]{MinIO 对象};}\\[-2pt]
+            {\footnotesize 职责：结构化业务数据 + 低时延记忆窗口 + 大对象卸载}
+            \end{tabular}};
+        \draw[-{Latex[length=2.5mm]}, thick] ($(L1.south)+(0,0.15)$) -- ($(L2.north)+(0,-0.15)$);
+        \draw[-{Latex[length=2.5mm]}, thick] ($(L2.south)+(0,0.15)$) -- ($(L3.north)+(0,-0.15)$);
+        \draw[-{Latex[length=2.5mm]}, thick] ($(L3.south)+(0,0.15)$) -- ($(L4.north)+(0,-0.15)$);
+    \end{tikzpicture}
+    \caption{系统分层架构示意图：UML 组件图风格。箭头表示依赖与调用方向}
+    \label{fig:layer_arch}
+\end{figure}
+
+\section{国内外研究现状}
+
+\subsection{国外研究现状}
+
+\subsubsection{陪伴型应用线：从关系型智能体到商业化 AI 伴侣}
+国外关于“陪伴型对话系统”的研究与产品演进较早，形成了从关系型智能体理论到大规模应用平台的连续谱系。早期研究强调长期关系建立与信任维持机制\cite{Bickmore2005}，随后在心理健康支持方向出现了以 Woebot 为代表的可量化评估工作\cite{Fitzpatrick2017}。在产业化层面，Replika 与 Character.AI 分别代表“长期情感陪伴”与“角色化对话社区”两类典型路径，二者都强调持续互动、个体化角色与多轮上下文体验\cite{ReplikaOfficial,ReplikaHelp,CharacterAIAbout,CharacterAIProduct}。从学术与产业结合角度看，小冰体系将“同理心计算 + 长期会话指标 CPS”工程化，提供了陪伴型系统从实验到规模化运营的标志性案例\cite{ShumXiaoice2020}。相关开放域聊天研究进一步指出，陪伴型场景相较通用问答更依赖人格一致性、记忆连续性与安全边界设计\cite{Roller2021,Zhao2023Survey}。
+
+\subsubsection{Live2D 与 VTuber 生态线：从角色驱动到平台化体验}
+在数字人表现层面，国外与日本产业生态形成了“角色资产标准化 + 平台化运营”的发展路径。Live2D Cubism 作为二维角色参数驱动框架，提供了在低资源条件下实现表情、动作和口型驱动的工业化工具链\cite{live2d}。VTuber 产业侧则以 hololive 等生态为代表，逐步从直播表演扩展到虚拟世界与跨场景互动平台，例如 Holoearth，推动了“角色 IP、实时互动、用户共创”的融合发展\cite{HoloearthNews,HoloearthPlatform,HololiveProduction}。这一线索表明，数字人的核心竞争力不只在渲染质量，也在于角色运营与互动机制设计。对本文而言，这类实践启示在于：Web 端研究原型应优先保证资源组织规范、动作表达一致性与跨端可部署性，再逐步扩展复杂场景能力。
+
+\subsubsection{LLM 驱动对话 Agent 线：从单轮生成到可执行智能体}
+大模型推动对话系统从“回复生成器”向“可规划、可调用工具、可长期记忆”的 Agent 形态迁移。ReAct 将推理与行动耦合到统一轨迹中，显著提升交互任务表现\cite{ReAct2023}；Toolformer 展示了模型自监督学习工具调用的能力\cite{Toolformer2023}；Generative Agents 给出“观察—记忆—反思—计划”架构，验证了多智能体社会行为模拟的可行性\cite{GenerativeAgents2023}。在工程框架层，CAMEL、AutoGen 与相关 Agent 综述工作进一步推动多 Agent 协作、任务分解与流程编排标准化\cite{CAMEL2023,AutoGen2023,AgentSurvey2023}。这些研究与平台共同构成了当前国外 LLM Agent 的主线：能力边界不断扩展，但系统稳定性、成本与安全治理仍是落地难点\cite{MemGPT2023}。
+
+\subsection{国内研究现状}
+
+\subsubsection{工业界：小冰、阿里通义虚拟人、商汤如影、网易伏羲}
+国内工业界在“数字人 + 大模型 + 行业场景”融合方面推进较快。小冰体系较早给出面向长期陪伴的情感聊天框架与可量化指标\cite{ShumXiaoice2020}。阿里云虚拟数字人平台强调从形象定制、语音驱动到多场景部署的一体化能力，面向教育、政务、客服等场景提供 PaaS/SaaS 接入\cite{AliyunAvatarProduct,AliyunAvatarDocs}。商汤如影围绕“数字人视频/直播 + 多模态大模型运营”形成产品化方案，并发布相关白皮书与评估体系，强化行业应用指标\cite{SenseAvatarProduct,SenseAvatarNews,SenseAvatarWhitepaper}。网易伏羲则在“文本模型 + 音色 + 虚拟形象”组合能力上推进虚拟智能体与虚拟人产品化落地\cite{NeteaseFuxiAgent,NeteaseFuxiVirtualHuman,NeteaseFuxiIntro}。整体上，国内工业界路径呈现出明显的“场景牵引 + 平台整合 + 快速迭代”特征。
+
+\subsubsection{学术界：基于 CNKI 关键词的研究脉络}
+以 CNKI 为主要检索库，围绕“情感对话”“虚拟数字人”“多轮记忆”“用户画像”关键词可见，国内学术研究主要集中在四类方向：其一，情感对话生成与共情策略建模\cite{Li2021EmotionDialogueCN,Chen2022EmpatheticDialogueCN}；其二，高校与教育场景中的虚拟数字人应用模式\cite{Wang2023CampusDigitalHumanCN,Wu2024AIEducationCN}；其三，多轮对话的记忆增强与召回机制\cite{Sun2022DialogueMemoryCN}；其四，用户画像驱动的个性化服务与推荐\cite{He2023UserProfileCN}。总体而言，国内学术工作在算法模型和应用讨论上积累较快，但与可复现工程系统之间仍有一定距离，尤其在“前端表现层—后端推理层—数据治理层”一体化验证方面仍需加强。
+
+\subsection{现状小结}
+综合国内外文献与产业实践，可以归纳出三点：第一，陪伴型系统已从“可聊天”转向“可长期关系维护”，评价维度从单轮质量扩展到连续体验；第二，数字人生态从单点渲染能力转向“角色运营 + 平台互动 + 多模态内容生产”；第三，LLM Agent 正在重塑系统架构，但部署可控性与工程稳定性仍是主线问题。本文的切入点是将上述三条线在 Web 工程中落地为可运行原型：以 Live2D 承担角色呈现，以双模型与 WebSocket 流式链路承担对话与朗读编排，以结构化数据承担会话、记忆与关怀能力的持续演进。
+
+\section{研究内容、差异化贡献与论文结构}
+
+\subsection{研究内容}
+本文以 CubismDemo 工程为基础，完成如下实现任务：
+\begin{enumerate}
+    \item \textbf{前端交互与呈现模块：}完成 Live2D 渲染接入、双栏交互界面、流式字幕展示、模型包与背景切换、语音输入与识别回填。
+    \item \textbf{服务端会话编排模块：}基于 FastAPI 构建 WebSocket 会话服务，接入 Ollama 双模型分别承担聊天与动作决策；朗读在\textbf{云端 MiMo} 与\textbf{本地 GPT-SoVITS} 间可配置，默认前者；本地分支\textbf{示例配置已落后}，不作本文默认复现路径。
+    \item \textbf{通信与时序控制模块：}在 WebSocket 上完成流式文本与音频帧的下发约定，含断线重连、音频分段序号与前端播放队列管理；附带 Demo 采用单连接朗读路径。
+    \item \textbf{数据与业务 API 模块：}基于 MySQL 设计并落地 9 张核心表，表名依次为 \texttt{user}、\texttt{persona}、\texttt{system\_config}、\texttt{live2d\_model\_asset}、\texttt{live2d\_tts\_refer}、\texttt{user\_profile}、\texttt{chat\_session}、\texttt{long\_memory}、\texttt{remind\_trigger}；在 \texttt{http\_api.py} 中实现 61 条 REST 路由，统一 \texttt{code/message/data}。
+\end{enumerate}
+
+\subsection{差异化贡献}
+相较于通用聊天机器人、情感陪伴 App 与单纯 Live2D 演示项目，本文的差异化贡献主要体现在：
+\begin{enumerate}
+    \item \textbf{主链路工程贯通：}在同一仓库内打通“文本生成—动作决策—语音合成—角色呈现—会话与记忆写入”等可运行步骤；主动关怀推送等仅在数据与接口层预留，文中单独说明未完整接通。
+    \item \textbf{可控性设计：}采用动作字段解析、服务端校验与客户端资源映射相组合的机制，降低模型输出直接驱动表现层带来的越权与不当动作风险。
+    \item \textbf{可演进数据底座：}将记忆与关怀能力前置到数据库与 API 设计，明确后续可扩展路径，为长期陪伴场景提供工程接口基础。
+\end{enumerate}
+
+\subsection{论文结构}
+第二章归纳关键技术脉络并进行\textbf{选型对比}；第三章为需求分析、总体设计与分层记忆；第四章按\textbf{前端实现、WebSocket 通信、服务端编排、数据持久化与 API}四块阐述实现；第五章总结、创新点与不足及未来工作。
+
+% ====================================================
+% 第二章 关键技术、选型对比与开发基础
+% ====================================================
+
+\chapter{系统实现基础与技术选型}
+\section{技术演进脉络与共性瓶颈}
+近年来大模型对话从开放域闲聊走向\textbf{角色化、长期交互与工具调用}\cite{Zhao2023Survey,Roller2021}；数字人呈现层则从离线动画走向\textbf{实时参数驱动与直播形态}\cite{live2d,HololiveProduction}。共性瓶颈有三：一是\textbf{纯文本交互缺乏情感注意线索}，如表情、语调与停顿；二是\textbf{端到端工程链路长}，学生课题易止步于 Demo；三是\textbf{记忆与策略模块若缺少数据落地}则难以复现实验与迭代。本章选取四项支撑技术，分别给出\textbf{原理要点、选型理由与替代方案对比}。
+
+\section{Live2D Cubism 角色呈现}
+
+\textbf{原理要点：}Live2D 通过二维网格变形与参数曲线驱动表情/姿态，配合 physics、motion、expression 等资源形成可渲染闭环\cite{live2d}。本项目将\textbf{expression/motion 标识}限定于当前模型包目录索引，服务端校验后再驱动前端，避免“模型幻觉驱动不可执行资源”。
+
+\textbf{替代方案对比：}\textbf{其一}，VRM 与三维引擎结合方案，例如 Three.js，表现力更强，但绑骨、光照与 Web 性能调优成本高，不利于本科周期内稳定交付。\textbf{其二}，纯 SVG/CSS 虚拟形象方案实现轻，但难以获得商用级口型与动作资产生态。\textbf{其三}，Live2D 以\textbf{较低算力与成熟 SDK}换取可用的视觉反馈密度，契合``对话为主、形象为辅''的定位。
+
+\section{WebSocket 与流式下行：对比 SSE 与长轮询}
+
+\textbf{原理要点：}WebSocket 在单一 TCP 连接上提供全双工帧传输，适合交错下发 JSON 事件与二进制音频载荷\cite{rfc6455,mdn-ws}。
+
+\textbf{对比：}\textbf{HTTP 长轮询}实现简单但头部开销大、实时性差；\textbf{SSE}适合\textbf{服务端单向文本流}，浏览器 API 友好，但\textbf{难以在同一语义通道内无损混合二进制音频帧}，工程上往往依赖第二条连接或 Base64 编码膨胀。本项目采用 WebSocket；\textbf{当前附带前端默认走单连接合并流}：在\textbf{对话 WebSocket 接口}（\texttt{/ws/chat}）上先发 JSON 文本帧，再在启用 TTS 时下发 \texttt{type=chunk\_audio} 元数据并\textbf{紧随二进制 WAV}，与前端客户端解析逻辑一致\cite{rfc6455,mdn-ws}。
+
+\section{Ollama 双模型分工：聊天与动作}
+
+\textbf{原理要点：}聊天模型以 stream 方式生成自然语言；动作模型输出结构化 JSON，字段含 expression 与 motion，由服务端解析、校验与回退\cite{ollama}。
+
+\textbf{对比单模型混合生成：}单模型同时生成“台词 + 动作标签”易出现风格漂移与格式不稳；\textbf{分工}可将调参空间解耦，调试日志更清晰。代价是一次交互需\textbf{两次推理调用}，总时延上升，本项目以工程可控性换取稳定性。
+
+\section{语音合成：本地合成与云端接口的取舍}
+
+\textbf{流水共性：}无论后端指向本地引擎还是云端 API，合成侧都先将回复文本按句号、叹号、问号等边界切段，并行请求 TTS，回收 PCM 或 WAV 后统一封装，再按音频序号保序经 WebSocket 下发。上传的参考音频可先经 \textbf{ffmpeg} 规范为统一采样率与位深的 PCM WAV，减少容器与码率差异导致的失败\cite{ffmpeg}。
+
+\textbf{本质矛盾在部署形态。}\textbf{本地合成}（本仓库以 GPT-SoVITS 接口为代表\cite{gptsovits}）将声学与算力留在自有机器：数据与推理路径相对可控、外网依赖弱、便于离线实验与深度定制；代价是显存与算力与对话侧模型竞争，环境依赖与版本组合复杂，在消费级单卡上易出现排队与稳定性问题。本课题联调机为 GeForce RTX 3050 档：同时承载浏览器、Ollama 双模型与本地 TTS 时，显存争用与延迟波动较为突出。\textbf{云端合成}（本文默认采用小米 MiMo\cite{mimoV25Docs}）把声学推理外移到服务端接口：本机 GPU 主要留在对话与动作模型，弱显卡环境下端到端体验更容易保持稳定；代价是网络时延与可用性绑定供应商，需处理密钥、配额与合规，并承担持续调用成本。MiMo 提供参考音频驱动的音色约束与若干韵律相关可调项（以当前文档为准\cite{mimoV25Docs}），在有限开发周期内绑定角色声音的成本通常低于本地自训路线。
+
+\textbf{工程结论：}TTS 在代码层抽象为可插拔实现，可通过配置在两条路径间切换，调用方与前端协议保持不变，密钥与算力均不暴露给浏览器。\textbf{当前仓库默认配置与文档以 MiMo 为主线}；GPT-SoVITS 分支仍保留于代码树，但其示例依赖与环境变量说明\textbf{未随主线同步维护}，重新启用需自行对齐上游版本与本地环境，不宜默认假设``开箱即用''。
+
+\section{数据三元结构与开发环境}
+MySQL 负责结构化实体与审计友好 CRUD\cite{mysql80}；Redis 承担\textbf{毫秒级读写窗口}，覆盖瞬时与短期列表及长期合并字符串\cite{redis}；MinIO 卸载大文件对象\cite{minio}。后端默认 \texttt{8000}，前端以 \texttt{VITE\_*} 注入 API/WS 基址；生产环境需切换 HTTPS/WSS 与 CORS 白名单，详见工程 \texttt{.env} 与文档。
+
+\chapter{系统需求分析与总体设计}
+\section{需求分析}
+\subsection{需求来源与边界说明}
+本系统的需求并非仅来自“聊天演示”目标，而是来自课程项目场景下三类约束：第一，用户侧需要低门槛、连续的\textbf{文本、语音与 Live2D 形象}同时可用的交互；第二，开发侧需要可演进、可替换、可排障的工程结构；第三，文档与实现之间需要边界清晰、验收口径可追溯、实验条件可复现。基于此，本文把需求划分为功能需求与非功能需求两层，并在后文分别给出可追踪描述。
+
+为避免“需求写得大、实现落地小”的常见问题，本章采用以下边界约定：
+\begin{itemize}
+    \item \textbf{已实现能力}：可在当前代码与运行链路中直接验证的能力，如登录、文本对话、语音对话、模型切换、流式文本与音频下发、资源上传与索引等；
+    \item \textbf{目标能力}：已完成数据结构或接口预留、但尚未完整接入主链路的能力，如定时主动关怀推送；
+    \item \textbf{不纳入范围}：心理诊断、医疗决策、跨平台原生客户端等超出本科毕设实现周期的能力。
+\end{itemize}
+
+\subsection{UML 用例分析}
+用例图由参与者、用例、系统边界及关联关系构成，用于描述系统对外提供的功能视图。附带的 Web Demo \textbf{不提供访客可用的业务入口}：主界面与会话能力仅在认证通过后可用，故不存在``访客用户''参与者。参与者划分为：\textbf{用户}（尚未建立会话时完成注册或登录）、\textbf{已登录用户}（文本/语音对话、模型与背景切换、查看本会话历史等）、\textbf{资源管理用户}（面向运维侧的资源上传与索引、画像等配置）、\textbf{后台调度器}（定时触发器扫描与主动关怀相关目标能力）。图 \ref{fig:usecase_overview} 中矩形框表示系统边界，椭圆表示用例；实线为关联，箭头上标注的为实现层面的依赖说明（语音对话经识别后复用文本发送链路；推送依赖扫描派发）。
+
+\begin{figure}[H]
+    \centering
+    \resizebox{0.95\textwidth}{!}{
+    \begin{tikzpicture}[
+        actor/.style={draw, rounded corners, align=center, minimum width=1.9cm, minimum height=0.9cm},
+        usecase/.style={draw, ellipse, align=center, minimum width=2.45cm, minimum height=0.95cm},
+        line/.style={-{Latex[length=2mm]}, thick}
+    ]
+        % actors（边界外）
+        \node[actor] (actor_auth) at (-1.2, 6.1) {用户};
+        \node[actor] (actor_user) at (-1.2, 3.35) {已登录用户};
+        \node[actor] (actor_admin) at (-1.2, 0.85) {资源管理用户};
+        \node[actor] (actor_cron) at (16.2, 3.35) {后台调度器};
+
+        % use cases（边界内）
+        \node[usecase] (uc_login)   at (4.0, 6.35) {登录系统\\{\footnotesize （含注册）}};
+        \node[usecase] (uc_text)    at (4.0, 4.95) {文本对话};
+        \node[usecase] (uc_voice)   at (4.0, 3.55) {语音对话};
+        \node[usecase] (uc_switch)  at (4.0, 2.15) {模型与背景切换};
+        \node[usecase] (uc_hist)    at (8.2, 5.65) {会话记录查看};
+        \node[usecase] (uc_profile) at (8.2, 4.25) {用户画像管理};
+        \node[usecase] (uc_asset)   at (8.2, 2.85) {Live2D 资源上传/索引};
+        \node[usecase] (uc_push)    at (8.2, 1.25) {主动关怀推送};
+        \node[usecase] (uc_scan)    at (11.8, 3.25) {触发器扫描与任务派发};
+
+        % 系统边界（矩形）
+        \node[
+            draw=black!75,
+            thick,
+            inner sep=14pt,
+            rounded corners=3pt,
+            fit=(uc_login)(uc_text)(uc_voice)(uc_switch)(uc_hist)(uc_profile)(uc_asset)(uc_push)(uc_scan),
+            label={[anchor=north west, yshift=-2pt]north west:\textbf{系统边界：Live2D 数字人 Web 系统}}
+        ] (sysbound) {};
+
+        % associations
+        \draw[thick] (actor_auth) -- (uc_login);
+        \draw[thick] (actor_user) -- (uc_text);
+        \draw[thick] (actor_user) -- (uc_voice);
+        \draw[thick] (actor_user) -- (uc_switch);
+        \draw[thick] (actor_user) -- (uc_hist);
+        \draw[thick] (actor_admin) -- (uc_asset);
+        \draw[thick] (actor_admin) -- (uc_profile);
+        \draw[thick] (actor_cron) -- (uc_scan);
+        \draw[thick] (actor_cron) -- (uc_push);
+
+        % 依赖（实现层面）
+        \draw[line] (uc_voice) -- node[above, sloped, font=\scriptsize]{识别后复用} (uc_text);
+        \draw[line] (uc_push) -- node[above, sloped, font=\scriptsize]{依赖} (uc_scan);
+    \end{tikzpicture}
+    }
+    \caption{系统 UML 用例图（含系统边界；无访客模式）}
+    \label{fig:usecase_overview}
+\end{figure}
+
+\subsection{功能需求明细}
+表 \ref{tab:functional_requirements} 逐条给出\textbf{场景说明、输入输出与验收要点}，编号 FR-xx 在后文设计与实现中可作需求追溯索引。
+
+\begin{table}[H]
+    \centering
+    \caption{系统功能需求明细表}
+    \label{tab:functional_requirements}
+    \small
+    \setlength{\tabcolsep}{3.5pt}
+    \begin{tabular}{|p{1.2cm}|p{2.3cm}|p{3.0cm}|p{2.4cm}|p{3.2cm}|}
+        \hline
+        \textbf{编号} & \textbf{功能名称} & \textbf{需求说明} & \textbf{输入/输出} & \textbf{验收要点} \\
+        \hline
+        FR-01 & 登录与会话初始化 & 用户可通过登录页完成身份进入，系统生成并持久化会话相关参数，含 user\_id、session 与基础地址配置。 & 输入：账号信息；输出：可进入主界面的会话状态。 & 未登录无法进入主页面；登录后可正常发起对话。 \\
+        \hline
+        FR-02 & 文本对话 & 用户输入文本后，服务端返回流式文本片段，并在前端逐段展示与收敛。 & 输入：message；输出：chunk/done/error 事件。 & 可见流式输出；出现异常时返回可读错误。 \\
+        \hline
+        FR-03 & 语音对话 & 用户语音经浏览器采集与识别转为文本，并复用文本对话主链路。 & 输入：音频流；输出：识别文本 + 对话结果。 & 语音与文本入口结果一致；失败时可降级为手动文本输入。 \\
+        \hline
+        FR-04 & 角色动作与表情反馈 & 系统依据结构化字段驱动 Live2D 表情/动作，避免纯文本回复造成反馈单一。 & 输入：expression/motion；输出：模型动作执行。 & 字段非法时有回退策略；模型切换后映射仍有效。 \\
+        \hline
+        FR-05 & TTS 语音播报 & 对话文本按切段策略触发 TTS 合成，经\textbf{对话 WebSocket 接口}分段下发并播放。 & 输入：文本分段；输出：\texttt{chunk\_audio} 元数据 + 紧随 WAV。 & 音频按序播放；单段失败不阻断整轮文本。 \\
+        \hline
+        FR-06 & 模型与背景切换 & 用户可切换角色模型与场景背景；模型切换时重连通信通道并更新包参数。 & 输入：package/background 选择；输出：新模型状态。 & 切换后无明显残留状态；旧连接不干扰新会话。 \\
+        \hline
+        FR-07 & WebSocket 异常恢复 & 网络中断或服务重启时，客户端自动重连并维持可交互状态。 & 输入：连接中断事件；输出：重连后的可用连接。 & 延迟重连可触发；重连后可继续发送消息。 \\
+        \hline
+        FR-08 & 会话与历史沉淀 & 每轮对话可写入持久化存储，并支持后续查询和统计。 & 输入：用户消息与回复；输出：会话记录。 & 历史可按用户/分页读取；字段结构完整。 \\
+        \hline
+        FR-09 & Live2D 资源上传与索引 & 管理端上传模型资源 ZIP，系统完成解析、对象存储落盘与数据库索引。 & 输入：ZIP 文件；输出：package 索引记录。 & 可列出包信息；可删除指定包并清理索引。 \\
+        \hline
+        FR-10 & 用户/画像/触发器管理 API & 提供用户、画像、触发器等 REST 接口，支撑业务配置与后续策略扩展。 & 输入：HTTP 请求；输出：统一 code/message/data。 & 接口返回结构一致；异常场景返回可读信息。 \\
+        \hline
+        FR-11 & 主动关怀推送，目标能力 & 基于触发器规则在指定时间向用户推送关怀内容，形式覆盖文本、语音与角色表现。 & 输入：触发规则与时间；输出：推送任务结果。 & 当前阶段保留目标能力定义与接口约束，不作为已完成能力验收。 \\
+        \hline
+    \end{tabular}
+\end{table}
+
+在表格化需求基础上，本文进一步强调以下设计原则：第一，语音对话应复用文本主链路，避免形成并行“第二套对话系统”；第二，动作执行必须受资源目录约束，防止模型输出不可执行指令；第三，目标能力应明确标注当前实现状态，避免论文叙述与代码事实脱节。
+
+\subsection{非功能需求明细}
+除功能条目外，交互系统还需约束时延、连续性、容错、安全与可维护性等质量属性。表 \ref{tab:nonfunctional_requirements} 按性能、可靠性、可用性、安全、可维护、可扩展、可测试等维度列出需求与度量思路；条目与本系统在联调中暴露的典型风险点相对应。受实验室机型与网络条件限制，表中\textbf{目标值类}表述表示设计与实现阶段的期望阈值，\textbf{不构成跨环境压测结论}。
+
+\begin{table}[H]
+    \centering
+    \caption{系统非功能需求明细表}
+    \label{tab:nonfunctional_requirements}
+    \small
+    \setlength{\tabcolsep}{4pt}
+    \begin{tabular}{|p{1.3cm}|p{2.2cm}|p{3.0cm}|p{2.7cm}|p{2.9cm}|}
+        \hline
+        \textbf{编号} & \textbf{质量属性} & \textbf{需求约束} & \textbf{度量方式} & \textbf{工程措施} \\
+        \hline
+        NFR-01 & 性能：交互时延 & 文本对话应具备可感知流式首包，避免长时间无反馈。 & 记录首个 chunk 到达时间与整轮耗时。 & 聊天模型采用流式推送；前端增量渲染。 \\
+        \hline
+        NFR-02 & 性能：播放连续性 & 音频分段播放应避免明显乱序与断裂。 & 统计音频序号是否单调、播放中断次数。 & 服务端分段编号；客户端队列保序播放。 \\
+        \hline
+        NFR-03 & 可靠性：断线恢复 & 异常断连后应能自动重连并恢复服务可用。 & 观察重连成功率与恢复时长。 & 延迟重连、旧连接隔离、模型切换重连抑制。 \\
+        \hline
+        NFR-04 & 可用性 & 主流程操作路径清晰，用户在 3 步内可发起一次完整交互。 & 任务完成率、操作步骤统计。 & 左会话右角色布局；输入入口统一。 \\
+        \hline
+        NFR-05 & 安全性：传输与访问 & 生产环境需采用 HTTPS/WSS，并限制高风险管理接口访问。 & 配置核查、日志审计。 & 环境变量隔离、权限控制、错误信息收敛。 \\
+        \hline
+        NFR-06 & 可维护性 & 模块边界清晰，通信、渲染、业务逻辑可独立修改。 & 代码结构审查、模块依赖分析。 & 配置集中管理、统一响应结构、职责分层。 \\
+        \hline
+        NFR-07 & 可扩展性 & 允许替换模型、TTS 后端、存储实现而不重写主流程。 & 替换工作量与改动面评估。 & 通过接口封装与配置注入实现组件解耦。 \\
+        \hline
+        NFR-08 & 可测试性 & 关键链路具备可观测日志与错误回传，支持联调排障。 & 日志覆盖率、错误定位时长。 & 统一 chunk、done、error 等事件语义与异常处理。 \\
+        \hline
+    \end{tabular}
+\end{table}
+
+\section{总体架构与 B/S 边界}
+系统采用 B/S 结构：浏览器负责渲染、采集与协议适配；FastAPI 进程负责会话编排、模型调用与统一 API；MySQL/Redis/MinIO 分工承载结构化数据、热数据与大对象。图~\ref{fig:layer_arch}从顶层给出四层组件视图；本节以下聚焦\textbf{对话主链路的时序}与\textbf{分层记忆落地}。其中区分两类内容：一类是\textbf{本轮请求里直接发给模型的文字}（如最近几轮对话）；另一类是\textbf{平时摆在 Redis/MySQL 里、按固定步骤再读出来拼进请求的资料}（如长期概要）。何时读写由服务端编排决定，这一写法可与 MemGPT ``单次看得见的字数有限、其余放进库里按需取用'' 的思路对照阅读，详见~\ref{sec:memgptrelation}。
+
+\section{一轮交互中的文本帧、音频帧与下行方式}
+一轮交互在数据形态上同时包含：用户侧\textbf{文本或经 ASR 得到的文本}、模型返回的\textbf{增量文本}，以及\textbf{驱动角色的表情与动作字段}和\textbf{TTS 生成的语音段}。在\textbf{当前 Demo} 中，文本侧为 JSON 文本帧，音频侧为紧随 \texttt{chunk\_audio} 声明之后的\textbf{二进制 WAV}，二者仍经\textbf{同一条对话 WebSocket 连接}（\texttt{/ws/chat}）到达浏览器，由前端解码入队驱动播放与口型；这与``逻辑上分立的文本事件与音频载荷''并不矛盾，只是物理上未再打开第二条朗读专用 WebSocket。端到端参与者与消息顺序见图~\ref{fig:seq_main_dialogue}。
+
+\section{会话键、模型包与后端契约}
+查询串中的 \verb|session| 由前端生成并写入 \texttt{sessionStorage}，与 MySQL \texttt{chat\_session.session\_key} 对齐，用于区分浏览器标签页内的会话；\textbf{不是用来配对两条聊天 Socket}。\verb|package| 与 Live2D 资源目录名一致，切换模型时会\textbf{关闭并重连} \verb|/ws/chat| 并带上新的 \verb|package=|；\verb|user_id| 一并带上，供后端按用户加载音色参考等数据。
+
+客户端向 \verb|/ws/chat| 发送 JSON \verb|{"message": "..."}|。连接建立后服务端先推送 \verb|catalog|；随后可能下发 \verb|chunk| 文本增量、在启用朗读时的 \verb|chunk_audio| 元数据及紧随的一条 WAV 二进制帧，以及结束标记 \verb|done| 或错误 \verb|error|。类型名与顺序以 \texttt{PY/router/wschat.py} 首部文档为准；朗读载荷随 \verb|chunk_audio| 与紧随 WAV 在同一路径下行。
+
+\section{核心用例与时序图}
+
+主对话顺序自\textbf{用户}经\textbf{浏览器客户端}发起。若输入为\textbf{键盘文本}，话语文本由界面直接形成；若输入为\textbf{语音}，则麦克风 PCM 经 WebSocket 接入\textbf{语音识别网关}（\texttt{/ws/asr}），由网关与\textbf{云端语音识别服务}（DashScope）建立实时会话并在 PCM 帧上行过程中回传识别事件，浏览器在获得\textbf{终稿文本}后转入与键盘相同的提交路径。两类输入汇合后，浏览器向\textbf{对话编排服务}发送 WebSocket 文本帧，JSON 载荷中包含用户消息字段（如 \verb|{"message": "..."}|）；入口路由实现为 \texttt{/ws/chat}。
+
+编排服务依次访问\textbf{缓存与持久化}（Redis、MySQL），读取分层记忆与人设等上下文；随后调用\textbf{大语言模型服务}（Ollama）完成\textbf{动作决策}（非流式 JSON，返回表情与动作等字段）与\textbf{聊天补全}（流式生成）。在生成阶段，\textbf{文本增量帧}由编排服务下行至浏览器（首帧可合并表情与动作信息）；\textbf{朗读}则由编排服务按句切段，经 HTTP 调用\textbf{语音合成服务}（MiMo 或 GPT-SoVITS）取得 WAV，再以\textbf{朗读元数据帧及紧随的二进制 WAV}在同一 WebSocket 连接上保序下发，浏览器解码入队并以音频能量驱动口型。上游生成流结束后，编排服务下发\textbf{本轮结束标记}，并写回会话记录及瞬时/短期记忆更新等持久化与缓存侧效应。上述参与者与消息次序见图~\ref{fig:seq_main_dialogue}。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth,height=0.75\textheight,keepaspectratio]{主对话时序图}
+    \caption{主对话端到端时序（键盘与语音汇合；朗读默认经同一\textbf{对话 WebSocket 接口}合并流下发，路由 \texttt{/ws/chat}）}
+    \label{fig:seq_main_dialogue}
+\end{figure}
+
+\section{数据库九张表与 REST 规模}
+Schema 含：\texttt{user}、\texttt{persona}、\texttt{system\_config}、\texttt{live2d\_model\_asset}、\texttt{live2d\_tts\_refer}、\texttt{user\_profile}、\texttt{chat\_session}、\texttt{long\_memory}、\texttt{remind\_trigger}。REST 路由合计 61 条，定义于 \texttt{http\_api.py}，统一封装 \texttt{code/message/data}。
+
+\section{分层记忆设计：瞬时、短期与长期}
+
+\subsection{与经典模型及 MemGPT 的关系}\label{sec:memgptrelation}
+
+\subsubsection{阿特金森--谢弗林三级记忆模型与本文的类比边界}
+\textbf{文献称谓与核心主张。}认知心理学中所谓的\textbf{阿特金森--谢弗林三级记忆模型}（亦称\textbf{多层存储模型}，multi-store model）由 Atkinson 与 Shiffrin 系统阐述\cite{Atkinson1968}。其核心\textbf{图景}是：记忆并非单一扁平仓库，而是\textbf{在时间上串联的多级结构}；外界信息先进入\textbf{保持极短的感觉缓冲}，再经\textbf{注意}进入\textbf{容量有限的短时存储}，继而在\textbf{复述、编码与巩固}等控制过程作用下转入\textbf{保持更久的长时存储}，以供日后检索与利用。
+
+\textbf{第一级：感觉登记（sensory register）。}外界刺激在感官层面留下\textbf{极为短暂}的痕迹，容量相对较大但\textbf{衰减很快}；若未获得进一步注意，信息迅速丧失可读性。它在模型中承担``把物理刺激转为可供中枢加工的表征''的\textbf{门户}角色。
+
+\textbf{第二级：短时存储（short-term store，STS）。}被注意``选中''的信息进入 STS。教科书层面的共识表述是：STS \textbf{容量小、保持时间有限}（若不刷新），典型例子是\textbf{复述（rehearsal）}可在一定程度上\textbf{延长驻留}并把材料\textbf{推向长时存储}；STS 还被认为是\textbf{理解与操作当前任务材料的场所}，因而与``此刻意识中正在处理的内容''联系紧密。
+
+\textbf{第三级：长时存储（long-term store，LTS）。}相对 STS，LTS 被认为具有\textbf{更大的有效容量}与\textbf{更持久的保持}；材料一旦以某种形式\textbf{编码（encoding）}写入 LTS，便可经由\textbf{提取（retrieval）}回到 STS 参与当前加工。需要注意的是：早期图示常用\textbf{单向箭头}概括 STS$\rightarrow$LTS 的巩固路径；后续研究对工作记忆、语义网络与提取失败等现象作了细化，但\textbf{``分层 + 迁移''}仍是初学者理解记忆组织的抓手。
+
+\textbf{控制过程（control processes）。}模型强调\textbf{注意、复述、编码策略}等\textbf{由个体主动调配}的过程：同一刺激在不同复述深度或编码策略下，进入 LTS 的概率与质量可能不同。本文\textbf{不讨论}这些心理操作的测量与建模，只在工程侧借用``有的内容留在当下窗口、有的内容迁往更持久介质''这一\textbf{分工直觉}。
+
+\textbf{本文立场（类比而非仿真）。}上文\textbf{关于三级结构与流程的概括}用于\textbf{读者定位本文瞬时 / 短期 / 长期三联设计的叙述来源}；\textbf{绝不等于}在计算机里复制感官生理过程或复述\textbf{短时容量}等心理学定量结论。\textbf{对应思路}见表~\ref{tab:memory_analogy}：将\textbf{瞬时记忆}理解为``仍能直接装进本轮模型请求的多轮对话原文''；将\textbf{短期记忆}理解为``被挤出瞬时窗口后，经规则压缩或摘要生成的条目列表''；将\textbf{长期记忆}理解为``跨会话周期概要及其缓存''。\textbf{感觉登记}不对齐独立模块：麦克风 PCM、ASR 中间结果等更接近\textbf{人机接口缓冲}，本文\textbf{不强行贴上心理学标签}。
+
+\begin{table}[htbp]
+    \centering
+    \caption{阿特金森--谢弗林\textbf{三级}结构与本文三层记忆的\textbf{叙述类比}（非等价映射）}
+    \label{tab:memory_analogy}
+    \footnotesize
+    \setlength{\tabcolsep}{3pt}
+    \begin{tabular}{p{3.35cm}p{5.05cm}p{5.25cm}}
+        \hline
+        \textbf{心理学层级（简述）} & \textbf{本文工程对应（机制要点）} & \textbf{类比边界说明} \\
+        \hline
+        感觉登记：极短保持的感觉缓冲 & （不对齐独立模块）人机采集层 PCM、ASR 流式中间结果等 & 仅说明``门户缓冲''直觉；无感官生理学仿真 \\
+        \hline
+        短时存储：容量/时间受限，复述有助于转入长时 & 瞬时 List（最近 \(K\) 轮）+ 短期 List（挤出后的规则条目与可选摘要） & 容量由常量与 TTL 约束；``复述''对应规则压缩 / LLM 摘要 / 注入频次控制，而非心理复述 \\
+        \hline
+        长时存储：相对持久、可提取 & \texttt{long\_memory} 周期概要（MySQL）+ Redis 长期字符串缓存 & 非完整语义记忆理论实现；强调可注入、可审计、可失效（TTL） \\
+        \hline
+    \end{tabular}
+\end{table}
+
+\subsubsection{MemGPT：``看得见的一段短、库里的一段长''（与本文对照）}
+MemGPT 的核心直觉是：大模型\textbf{单次能读进去的字数有限}，不可能把全部历史原封不动塞进每一次请求；因此把\textbf{当下这一轮真正拼进 prompt 的那一小段}与\textbf{篇幅更长、先存放在外部的记录}分开——后者落在数据库、文件或向量库等\textbf{外部存储}里，对话进行中再按需读取、拼接或摘要写回，从而在不要求单次 prompt 无限变长的前提下延续多轮一致性\cite{MemGPT2023}。该范式强调：\textbf{（1）}``马上要给模型看的''和``暂时搁在库里''职责分清；\textbf{（2）}读写可以由系统自动编排（例如事件循环或 agent 决策）；\textbf{（3）}用户体验上接近``记得很久''，但单次推理实际看到的文字仍可控。
+
+与 MemGPT 相比，本文要解决的\textbf{是同一件实事}：上下文长度有限，却又要利用更早的对话与人设。\textbf{写法上同样拆成两块：}第一块是\textbf{本轮拼进请求里的文字}——主要是最近若干轮原文以及已经压进短期列表的条目，放进发给模型的 messages 或 system 拼装段；第二块是\textbf{平时放在 Redis 列表、Redis 字符串或 MySQL 字段里的较长记录}，只在后端代码的固定步骤里读取或更新，用户不会在浏览器里直接改数据库。\textbf{本文并非照搬 MemGPT 论文里的全套术语与机制；}只是借用``看得见的那一段短、库里的那一段长''这一分工来讲清楚设计。
+
+\textbf{本文刻意不做或少做的 MemGPT 要素}如下，须在文中主动界定边界，以免被误读为``实现了 MemGPT''：
+\begin{itemize}
+    \item \textbf{由模型自主决定何时读写库：}MemGPT 路线可由模型或上层 agent 按对话态势决定读档、写入与摘要策略；本文把\textbf{何时写 Redis、何时读 MySQL 概要}写死在编排代码的常见路径里——每轮结束做确定的 List 写入与裁剪，长期概要由\textbf{周期性固化任务}批量生成，而不是让单次对话里的 LLM 反复``拍板''存盘。
+    \item \textbf{论文中与操作系统类比的那套复杂调度：}本文未实现；实际用的是\textbf{可在配置里改、可在日志里核对}的 Redis List 操作（\texttt{LPUSH}/\texttt{LTRIM}）、TTL 续期和条目上限。
+    \item \textbf{检索形态：}MemGPT 常与向量检索、文档工具链结合；本文长期层以\textbf{结构化表字段 + 文本概要}为主，检索逻辑相对朴素，优先保证\textbf{工程落地与数据所有权清晰}，而非最大化开放域召回。
+\end{itemize}
+
+\subsubsection{小结：理论参照与实现落点}
+综上，\textbf{阿特金森--谢弗林三级记忆模型}（感觉登记—短时存储—长时存储）提供\textbf{分层与跨层迁移的叙事语言}，MemGPT 提供\textbf{``单次请求看得见的短、库里还可以存得长''}这类\textbf{对照说法}（并非本文实现了 MemGPT 全套机制）；二者共同用于\textbf{解释为何采用瞬时 / 短期 / 长期三联结构}，并强调\textbf{何时从 Redis/MySQL 读出、何时写回由服务端编排决定}。具体键名、TTL、条数上限、规则压缩与周期概要算法见下文；对话主循环中``读 Redis/MySQL 拼装记忆 $\rightarrow$ 推理 $\rightarrow$ 轮末写回''对应第四章实现，即上述分工的\textbf{可运行落地}。
+
+\subsection{Redis 数据结构、TTL 与容量默认值}
+\begin{itemize}
+    \item \textbf{瞬时记忆：}Redis \textbf{List}，键前缀默认 \texttt{moment}，元素为 JSON 字符串字段 \texttt{u}/\texttt{a}/\texttt{ts}；保留最近 \textbf{5} 轮，对应常量 \texttt{INSTANT\_MEMORY\_MAX\_TURNS}；空闲 TTL 默认 \textbf{3600\,s}。
+    \item \textbf{短期记忆：}Redis \textbf{List}，键前缀默认 \texttt{short}；单键 TTL 默认 \textbf{86400\,s}；最多 \textbf{20} 条，对应常量 \texttt{SHORT\_TERM\_MAX\_ENTRIES}；拼入 system 的字符上限默认 \textbf{4000}，对应常量 \texttt{SHORT\_TERM\_PROMPT\_MAX\_CHARS}。条目类型包含规则精简 \texttt{type=rule} 与可选摘要 \texttt{type=summary}。
+    \item \textbf{长期记忆缓存：}Redis \textbf{String}，键前缀默认 \texttt{long}，存合并后的周期概要正文片段；TTL 默认 \textbf{604800\,s}；注入上限默认 \textbf{2000} 字符，对应常量 \texttt{LONG\_MEMORY\_PROMPT\_MAX\_CHARS}。
+\end{itemize}
+
+\subsection{压缩与合并算法：规则为主，LLM 为辅}
+\textbf{瞬时层至短期层的规则路径：}当瞬时 List 长度超过窗口，被 \texttt{LTRIM} 挤出的最旧轮次经 \texttt{rule\_compact\_turn} 做截断与敷衍回复过滤，再 \texttt{LPUSH} 入短期 List。
+
+\textbf{周期概要生成路径：}后台任务读取 MySQL \texttt{chat\_session} 时间窗内记录，拼接为口述式叙述后调用 Ollama 生成 \texttt{long\_memory.period\_overview}，并刷新 Redis 长期字符串；主对话亦可读 MySQL 回填 Redis。
+
+\begin{verbatim}
+算法 即时记忆写入：每轮对话结束后执行
+输入: user_id, package_key, 本轮 user 文本 U, 助手文本 A
+1. 构造 JSON 轮次 R <- {u:U, a:A, ts:now()}
+2. LPUSH instant_key(user,pkg), R
+3. LTRIM instant_key 保留最近 K 轮          // 默认 K=5
+4. 若本轮挤出最旧轮 E:
+5.     E' <- RuleCompact(E)                // 截断+敷衍过滤
+6.     LPUSH short_key, E'
+7.     对 short_key 执行条数裁剪与 TTL 续期
+输出: 更新后的 Redis 状态
+\end{verbatim}
+
+\section{主动关怀数据说明：未完整闭环}
+表 \texttt{remind\_trigger} 与待扫描 REST 已实现，用于存储触发时间与文案。\textbf{本文版本未实现}到达触发时刻后自动推送到浏览器会话的常驻调度；论文不作``已上线定时关怀推送''表述，仅在展望中列为后续工作。
+
+
+\chapter{系统关键模块的设计与实现}
+
+\section{实现范围说明}
+本章只描述\textbf{可在当前仓库运行验证}的内容。\textbf{未实现或未闭环}者包括：定时关怀推送到客户端、独立常驻调度进程等，前文已交代，此处不重复声称。
+
+\section{前端页面、Live2D 与交互实现}
+\subsection{布局、登录态与可访问性}
+双栏布局：左侧会话与输入，右侧 Live2D。入口脚本校验 \texttt{localStorage.live2d\_info}，未登录跳转 \texttt{Login.html} 并携带 \texttt{redirect}。工具栏提供模型切换、背景轮换、资源上传入口与退出登录。
+
+\subsection{Live2D 初始化与常量配置}
+基于 Cubism 示例架构，核心类包括 \texttt{LAppDelegate}、\texttt{LAppSubdelegate} 与 \texttt{LAppModel}，集中维护画布尺寸、\texttt{Resources} 根路径与 \texttt{ModelDir}。切换模型时同步更新 WebSocket \texttt{package} 查询参数并调用 \texttt{/api/chat-sessions} 刷新左侧历史。
+
+\subsection{远程资源与性能取舍}
+对已登录用户，可按包拉取 \texttt{live2d\_model\_asset} 索引并对 \texttt{object\_key} 行请求预签名下载 URL，避免私有桶直链 403；并发 presign 上限在工程中设为约 24，以平衡握手开销。
+
+\subsection{语音输入}
+麦克风 PCM 经 \texttt{/ws/asr} 送往 DashScope Fun-ASR，终稿文本复用 \texttt{sendChatMessage}，保证单一对话入口。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.9\textwidth,height=0.65\textheight,keepaspectratio]{页面效果展示图.png}
+    \caption{系统页面效果展示}
+    \label{fig:ui_showcase}
+\end{figure}
+
+\section{WebSocket 连接与流式协议实现}
+\subsection{URL、会话参数与重连}
+\texttt{wsConfig.js} 为\textbf{对话 WebSocket 接口}（\texttt{/ws/chat}）拼接 \texttt{session}、\texttt{package}、\texttt{user\_id}，模块加载时即建立聊天连接；语音识别另用 \texttt{/ws/asr}。切换 Live2D 包名时调用重连逻辑，关闭当前\textbf{对话连接}再以新 \texttt{package=} 打开，避免旧 catalog 与模型目录不一致。
+
+\subsection{事件与播放队列}
+\texttt{ws.js} 在同一条\textbf{对话 WebSocket 连接}上处理 \verb|catalog|、\verb|chunk|、\verb|done|、\verb|error|；当服务端启用朗读时，在 JSON 文本帧中插入 \verb|chunk_audio| 元数据，并\textbf{紧接下一条消息为二进制 WAV}，按 segment 序号入队播放，Web Audio Analyser 的 RMS 驱动口型。
+
+\section{服务端对话编排与识别}
+\subsection{FastAPI 生命周期}
+启动时 \texttt{init\_catalog} 预热默认包索引；异步启动长期记忆后台循环；注册 CORS，并可通过环境变量追加 Origin。
+
+\subsection{对话主循环}
+连接后下发 \texttt{catalog}；每轮消息：读 Redis/MySQL 拼装记忆与人设 $\rightarrow$ 线程池执行动作模型 $\rightarrow$ 异步流式消费聊天模型 $\rightarrow$ 切段入队 TTS，采用并行 worker 与序号保序下发。记忆读取发生在该固定 pipeline 内，由服务端编排触发，对应~\ref{sec:memgptrelation}中\textbf{编排层主导外部存储}的表述；轮末写入瞬时/短期 Redis 与后台周期写长期 MySQL 亦由同一编排与固化任务负责，而非模型自主 paging。\texttt{/ws/asr} 独立路由，转发 DashScope。
+
+\section{数据持久化、REST API 与模型上传}
+\subsection{MySQL 与 Redis}
+九张业务表由 \texttt{schema.sql} 定义；仓储层封装 CRUD。Redis 承载瞬时/短期列表及长期概要缓存字符串。
+
+\subsection{REST 规模与统一 envelope}
+\texttt{http\_api.py} 暴露 \textbf{61} 条路由，响应统一 \texttt{code/message/data}。
+
+\subsection{ZIP 上传与 MinIO}
+\texttt{POST /api/live2d-model-assets/upload-zip} 解压、入库索引并上传对象存储；\texttt{GET .../packages} 聚合包维度元数据；删除包时同步清理包级人设及 Redis 中可能残留的导演人设缓存。
+
+\chapter{结论}
+
+\section{工作总结}
+本文面向高校学生日常\textbf{低门槛情感交互练习与原型验证}场景，交付浏览器端 Live2D 数字人系统一处。实现规模可概括为：\textbf{9} 张 MySQL 核心表、\textbf{61} 条 REST 路由；附带 Demo 前端建立\textbf{对话 WebSocket 接口}（\texttt{/ws/chat}）与语音识别接口（\texttt{/ws/asr}）两路连接，朗读并入\textbf{对话接口}。前端基于 Vite 组织的模块化源码与 Cubism 运行时；后端 FastAPI 编排 Ollama 双模型；朗读\textbf{以小米 MiMo 为当前默认实现}，GPT-SoVITS 仍保留于仓库；并完成 ZIP 模型入库与分层记忆工程化，含 Redis 列表与字符串、MySQL 周期概要以及后台固化任务；记忆架构与 MemGPT ``短上下文 + 库中延展'' 的说法可作理论对照，工程实现上的裁剪见~\ref{sec:memgptrelation}。
+
+\section{创新点与不足}
+\textbf{特色}体现在以下五点：
+\begin{enumerate}
+    \item \textbf{以“记忆驱动主动关怀”为主线的系统设计。}不仅保存历史对话，还把带时间线索的事件（如“周四考试”“临近重要节点”）结构化写入记忆与触发器；后端定时扫描到期条目后组装 Prompt，生成与上下文相关的关怀话术，实现“从被动应答到主动问候”的转变。
+    \item \textbf{可解释的主动关怀链路。}链路明确为“时间信息提取 $\rightarrow$ 记忆入库 $\rightarrow$ 日期匹配 $\rightarrow$ 文案生成 $\rightarrow$ 对话通道下发”，便于日志追踪与故障定位。典型场景如：三天前用户提到考试压力，临近日期时系统可主动跟进“明天就考试了，准备得怎么样？”。
+    \item \textbf{多源用户状态融合的分层接入策略。}在用户授权前提下，优先接入低成本、高可控的数据源（课程表、考试日期、用户自填日记/备忘）；朋友圈等社交数据仅作为可选扩展项，避免在本科阶段引入过高开发与合规成本。
+    \item \textbf{工程边界清晰的个性化能力。}将“稳定可复现”的关怀触发与记忆检索作为必做主线，把不同性格拟合、动态养成等能力定义为锦上添花扩展，保证工作量与交付质量可控。
+    \item \textbf{对标 MemGPT 思想的落地裁剪。}借鉴``单次请求字数有限、其余放进 Redis/MySQL 再按需拼接''的叙述\cite{MemGPT2023}，由编排层统一决定读写时机；未实现 MemGPT 论文中的完整事件泵与模型自主``翻页''，而以 Redis List/TTL/条数上限与周期固化作业替代，详见~\ref{sec:memgptrelation}。
+\end{enumerate}
+
+\textbf{不足如实陈述如下：}主动关怀链路已完成触发器与数据结构设计，但\textbf{全量自动闭环推送仍在完善}；未开展系统化并发压测与用户规模试验；语音识别绑定 DashScope，存在供应商依赖；与合成时延相关的量化表述仅基于\textbf{开发环境下的少量重复采样与主观观察}，\textbf{未附原始数据或日志}，不构成严格对比实验。
+
+\section{未来工作}
+\textbf{短期工作}优先围绕“记忆驱动主动关怀”闭环：打通触发器调度与推送通道；补齐时间信息抽取规则与误触发抑制；在用户授权前提下接入课程表、校历考试信息与轻量日记输入；完善鉴权与 HTTPS 部署清单，扩充基准样本量并报告分位数。\textbf{长期方向}包括探索检索增强 RAG 与更强隐私治理；在明确同意机制下评估社交动态等外部信息接入价值；逐步引入人格风格控制与动态养成策略，并用主观 MOS 与用户体验量表进行评估。
+
+% 写作规范：参考文献另起一页，且排在附录之前；暂无附录内容时不使用 \appendix。
+% 若需附录，请在 \end{thebibliography} 之后撰写 \appendix 及附录章。
+\clearpage
+\begin{thebibliography}{99}
+\bibitem{live2d} Live2D Inc. Cubism SDK Manual -- Web[EB/OL]. \url{https://docs.live2d.com/cubism-sdk-manual/top/}.
+\bibitem{mdn-ws} MDN Web Docs. WebSocket API[EB/OL]. \url{https://developer.mozilla.org/zh-CN/docs/Web/API/WebSocket}.
+\bibitem{mdn-audio} MDN Web Docs. Web Audio API 指南[EB/OL]. \url{https://developer.mozilla.org/zh-CN/docs/Web/API/Web_Audio_API}.
+\bibitem{vite} Vite Team. Vite Next Generation Frontend Tooling[EB/OL]. \url{https://vitejs.dev/}.
+\bibitem{fastapi} FastAPI Documentation[EB/OL]. \url{https://fastapi.tiangolo.com/}.
+\bibitem{ollama} Ollama Documentation[EB/OL]. \url{https://github.com/ollama/ollama}.
+\bibitem{rfc6455} Fette I, Melnikov A. The WebSocket Protocol: RFC 6455[S/OL]. IETF, 2011. \url{https://www.rfc-editor.org/rfc/rfc6455}.
+\bibitem{mysql80} Oracle. MySQL 8.0 Reference Manual[EB/OL]. \url{https://dev.mysql.com/doc/refman/8.0/en/}.
+\bibitem{redis} Redis Ltd. Redis Documentation[EB/OL]. \url{https://redis.io/docs/}.
+\bibitem{minio} MinIO, Inc. MinIO Object Storage for AI Data Infrastructure Documentation[EB/OL]. \url{https://min.io/docs/minio/}.
+\bibitem{gptsovits} RVC-Boss. GPT-SoVITS[EB/OL]. \url{https://github.com/RVC-Boss/GPT-SoVITS}.
+\bibitem{ffmpeg} FFmpeg Team. FFmpeg Documentation[EB/OL]. \url{https://ffmpeg.org/documentation.html}.
+\bibitem{mimoV25Docs} 小米 MiMo. Speech synthesis v2.5 usage guide：语音合成 V2.5 使用指南[EB/OL]. Xiaomi MiMo Platform. \url{https://platform.xiaomimimo.com/docs/zh-CN/usage-guide/speech-synthesis-v2.5}.
+\bibitem{Atkinson1968} Atkinson R C, Shiffrin R M. Human memory: A proposed system and its control processes[M]//Spence K W, Spence J T. The Psychology of Learning and Motivation: Advances in Research and Theory. New York: Academic Press, 1968: 89-195.
+\bibitem{MemGPT2023} Packer C, Fang V, Patil S, et al. MemGPT: Towards LLMs as operating systems[EB/OL]. arXiv:2310.08560, 2023. \url{https://arxiv.org/abs/2310.08560}.
+\bibitem{Bickmore2005} Bickmore T W, Picard R W. Establishing and maintaining long-term human-computer relationships[J]. ACM Transactions on Computer-Human Interaction, 2005, 12(2): 293-327.
+\bibitem{Fitzpatrick2017} Fitzpatrick K K, Darcy A, Vierhile M. Delivering cognitive behavior therapy to young adults with symptoms of depression and anxiety using a fully automated conversational agent (Woebot): A randomized controlled trial[J]. JMIR Mental Health, 2017, 4(2): e19.
+\bibitem{ShumXiaoice2020} Zhou L, Gao J, Li D, Shum H-Y. The design and implementation of XiaoIce, an empathetic social chatbot[J]. Computational Linguistics, 2020, 46(1): 53-93.
+\bibitem{Roller2021} Roller S, Dinan E, Goyal N, et al. Recipes for building an open-domain chatbot[J]. arXiv preprint arXiv:2004.13637, 2021.
+\bibitem{Zhao2023Survey} Zhao W X, Zhou K, Li J, et al. A survey of large language models[EB/OL]. arXiv:2303.18223, 2023. \url{https://arxiv.org/abs/2303.18223}.
+\bibitem{WHO2022} World Health Organization. World Mental Health Report: Transforming Mental Health for All[R]. Geneva: WHO, 2022.
+\bibitem{NMHReport2023} 傅小兰, 张侃, 陈雪峰, 等. 中国国民心理健康发展报告2021--2022[R]. 北京: 社会科学文献出版社, 2023.
+\bibitem{MOE2023} 教育部等十七部门. 全面加强和改进新时代学生心理健康工作专项行动计划2023--2025年[Z], 2023.
+\bibitem{Li2021EmotionDialogueCN} 李明, 王昊奋, 刘挺. 开放域情感对话系统研究进展[J]. 中文信息学报, 2021, 35(10): 1-15.
+\bibitem{Chen2022EmpatheticDialogueCN} 陈思宇, 黄萱菁, 林鸿飞. 共情对话生成技术综述[J]. 计算机科学, 2022, 49(6): 30-42.
+\bibitem{CAICTDigitalHuman2023} 中国信息通信研究院. 虚拟数字人发展白皮书2023年[R]. 北京: 中国信通院, 2023.
+\bibitem{Wang2023CampusDigitalHumanCN} 王磊, 刘洋, 赵倩. 高校场景下虚拟数字人应用模式与实现路径研究[J]. 现代教育技术, 2023, 33(9): 112-120.
+\bibitem{Liu2021StreamingSystemCN} 刘志强, 周明, 陈震. 面向实时交互的流式对话系统架构设计[J]. 软件导刊, 2021, 20(12): 15-22.
+\bibitem{Zhang2023RealtimeTTSCN} 张晨, 孙浩, 郭婷. 实时语音合成系统的低时延处理与播放调度[J]. 计算机工程与应用, 2023, 59(18): 210-218.
+\bibitem{Sun2022DialogueMemoryCN} 孙悦, 何婷婷, 郑伟. 面向多轮对话的记忆增强方法研究综述[J]. 计算机工程, 2022, 48(11): 1-12.
+\bibitem{He2023UserProfileCN} 何佳, 陈琳, 蒋勇. 用户画像驱动的个性化对话服务研究[J]. 情报理论与实践, 2023, 46(8): 97-104.
+\bibitem{Wu2024AIEducationCN} 吴岩, 李志民. 人工智能赋能高等教育数字化转型的关键问题与治理框架[J]. 中国高教研究, 2024(3): 12-19.
+\bibitem{CharacterAIAbout} Character.AI. About Character.AI[EB/OL]. \url{https://character.ai/about/}.
+\bibitem{CharacterAIProduct} Character.AI. Character.AI Product Site[EB/OL]. \url{https://character.ai/}.
+\bibitem{ReplikaOfficial} Replika. Replika Official Website[EB/OL]. \url{https://replika.com/}.
+\bibitem{ReplikaHelp} Replika. What is Replika?[EB/OL]. \url{https://help.replika.com/hc/en-us/articles/115001070951-What-is-Replika}.
+\bibitem{HololiveProduction} COVER Corp. hololive production[EB/OL]. \url{https://hololive.hololivepro.com/en/}.
+\bibitem{HoloearthNews} COVER Corp. On the Metaverse Project "Holoearth"[EB/OL]. \url{https://alt.hololive.tv/news/208}.
+\bibitem{HoloearthPlatform} COVER Corp. HOLOEARTH Official Site[EB/OL]. \url{https://holoearth.com/en/}.
+\bibitem{ReAct2023} Yao S, Zhao J, Yu D, et al. ReAct: Synergizing Reasoning and Acting in Language Models[C/OL]//ICLR 2023. \url{https://arxiv.org/abs/2210.03629}.
+\bibitem{Toolformer2023} Schick T, Dwivedi-Yu J, Dessi R, et al. Toolformer: Language Models Can Teach Themselves to Use Tools[C]//Advances in Neural Information Processing Systems (NeurIPS), 2023.
+\bibitem{GenerativeAgents2023} Park J S, O'Brien J C, Cai C J, et al. Generative Agents: Interactive Simulacra of Human Behavior[C]//Proceedings of UIST 2023. New York: ACM, 2023: 1-22.
+\bibitem{CAMEL2023} Li G, Hammoud H A A K, Itani H, et al. CAMEL: Communicative Agents for "Mind" Exploration of Large Language Model Society[EB/OL]. arXiv:2303.17760, 2023. \url{https://arxiv.org/abs/2303.17760}.
+\bibitem{AutoGen2023} Wu Q, Bansal G, Zhang J, et al. AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation[EB/OL]. arXiv:2308.08155, 2023. \url{https://arxiv.org/abs/2308.08155}.
+\bibitem{AgentSurvey2023} Xi Z, Chen W, Guo X, et al. The Rise and Potential of Large Language Model Based Agents: A Survey[EB/OL]. arXiv:2309.07864, 2023. \url{https://arxiv.org/abs/2309.07864}.
+\bibitem{AliyunAvatarProduct} 阿里云. 虚拟数字人产品介绍[EB/OL]. \url{https://www.aliyun.com/product/ai/avatar}.
+\bibitem{AliyunAvatarDocs} 阿里云. 虚拟数字人技术文档[EB/OL]. \url{https://help.aliyun.com/zh/avatar/}.
+\bibitem{SenseAvatarProduct} 商汤科技. 日日新·如影 SenseAvatar 产品页面[EB/OL]. \url{https://www.sensetime.com/cn/product-detail?categoryId=51134279&gioNav=1}.
+\bibitem{SenseAvatarNews} 商汤科技. 提升电商运营效率10倍，如影数字人超级直播间上线[EB/OL]. \url{https://www.sensetime.com/cn/news-detail/51169485?categoryId=72}.
+\bibitem{SenseAvatarWhitepaper} 商汤科技. 《大模型赋能下的AI 2.0数字人平台》白皮书发布[EB/OL]. \url{https://www.sensetime.com/cn/news-detail/51167623}.
+\bibitem{NeteaseFuxiAgent} 网易伏羲. 虚拟智能体产品页[EB/OL]. \url{https://fuxi.163.com/productDetail/agent}.
+\bibitem{NeteaseFuxiVirtualHuman} 网易伏羲. 虚拟人技术文档[EB/OL]. \url{https://fuxi.163.com/documents/4}.
+\bibitem{NeteaseFuxiIntro} 网易伏羲. 伏羲官方介绍[EB/OL]. \url{https://fuxi.netease.com/fuxi-introduction}.
+\bibitem{Picard1997} Picard R W. Affective Computing[M]. Cambridge, MA: MIT Press, 1997.
+\bibitem{Rashkin2018} Rashkin H, Smith E M, Li M, Boureau Y L. Towards Empathetic Open-domain Conversation Models: A New Benchmark and Dataset[C]//Proceedings of ACL. Melbourne, Australia: ACL, 2018: 537-549.
+\bibitem{Lewis2020} Lewis P, Perez E, Piktus A, et al. Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks[C]//Advances in Neural Information Processing Systems (NeurIPS). 2020, 33: 9459-9474.
+\end{thebibliography}
+
+\clearpage
+\chapter*{致谢}
+\addcontentsline{toc}{chapter}{致谢}
+
+大学四年接近尾声，本次毕业设计既是对所学人工智能与软件开发知识的综合运用，也是我第一次把``能跑的工程''与``能写得清的论文''对齐起来的完整演练。
+
+\textbf{开发过程中的体会与取舍亦加深了我对``边界条件''的认识。}例如语音链路曾依赖本地 \textbf{GPT-SoVITS-beta0706}，实测合成耗时偏高，难以与对话首包体验兼顾；后\textbf{以小米 MiMo 作为当前主线}，仓库中 GPT-SoVITS 相关代码未删，但\textbf{配置已落后于主线}，不宜再冒充``同等开箱''。切换至 MiMo 后又面临\textbf{限流与排队}等现实约束：基准测试中虽已知晓\textbf{断句标点数量取较小值}更利于听感衔接，仍将工程配置中的该参数\textbf{由 1 调整为 4}，以\textbf{合并更长的文本段再发起单次合成}，从而减少请求频次、换取更可预期的响应——这一过程让我体会到：论文中的``最优参数''未必总能直接落到线上环境，\textbf{部署约束与观测数据}同样构成设计的一部分。
+
+\textbf{存储与访问链路也曾耗费较多排查时间。}对象存储 \textbf{MinIO} 在私有桶场景下，\textbf{仅靠本地直链或未经鉴权的 URL 拼装}往往无法稳定获取模型与音频资源；实际可走通的路线依赖于\textbf{预签名下载链接或等价网关策略}等机制。把这一问题厘清之后，前端远程加载与权限边界才得以贯通。
+
+首先要衷心感谢导师\textbf{汪柳萍}老师。老师在选题边界、工程可实现性与论文叙事结构上给予了耐心指导，特别是在如何避免``术语堆砌''、如何把差异化写具体等问题上，帮助我反复校正叙述重心。
+
+感谢与朋友们在联调、界面体验与文档校对上的帮助；每一次卡住时的讨论，往往比单独查资料更有效。感谢家人在日常学习与疫情期间生活上的支持，使我能够相对稳定地完成开发与写作。
+
+最后感谢开源社区与各家技术文档维护者——Live2D、FastAPI、Ollama、Redis、MySQL、MinIO 以及本项目所依赖的其他库——没有这些可复用的基础设施，本科阶段难以在有限时间内完成端到端系统。
+
+\end{document}

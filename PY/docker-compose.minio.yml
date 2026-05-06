@@ -1,0 +1,19 @@
+# 本地 MinIO（S3 兼容），模拟对象存储
+# 启动: docker compose -f docker-compose.minio.yml up -d
+# 控制台: http://localhost:9001  账号 admin / password（本地开发；生产务必修改）
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password
+    volumes:
+      - minio_data:/data
+
+volumes:
+  minio_data:

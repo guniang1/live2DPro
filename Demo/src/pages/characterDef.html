@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="live2d-api-origin" content="">
+    <title>模型角色定义</title>
+    <style>
+        #back-btn {
+            position: fixed;
+            top: 22px;
+            left: 22px;
+            height: 44px;
+            padding: 0 20px;
+            border: 1px solid rgba(255, 255, 255, 0.35);
+            border-radius: 22px;
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            background: linear-gradient(145deg, #4a5568, #2d3548);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+            z-index: 100;
+        }
+        #back-btn:hover { filter: brightness(1.1); }
+
+        .upload-container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        h2 {
+            color: #333;
+            margin-bottom: 12px;
+            font-size: 24px;
+            border-bottom: 2px solid #2e9e6f;
+            padding-bottom: 10px;
+        }
+        .hint {
+            color: #555;
+            font-size: 14px;
+            line-height: 1.55;
+            margin: 0 0 16px;
+        }
+        .page-actions {
+            display: flex;
+            justify-content: flex-end;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+        .switch-page-btn {
+            height: 38px;
+            padding: 0 16px;
+            border: none;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            background: linear-gradient(135deg, #4a90d9 0%, #357abd 100%);
+        }
+        .switch-page-btn.secondary {
+            background: linear-gradient(135deg, #6f42c1 0%, #5a32a3 100%);
+        }
+        .upload-section {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 24px;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+        }
+        .form-group { margin-bottom: 18px; }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+            font-size: 14px;
+        }
+        .form-group select,
+        .form-group input[type="text"] {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            box-sizing: border-box;
+            background: #fff;
+        }
+        .form-group input[type="text"]:focus {
+            outline: none;
+            border-color: #2e9e6f;
+        }
+        .form-group textarea {
+            width: 100%;
+            min-height: 220px;
+            padding: 14px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            line-height: 1.5;
+            box-sizing: border-box;
+            font-family: inherit;
+            resize: vertical;
+        }
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #2e9e6f;
+        }
+        .upload-btn {
+            padding: 12px 28px;
+            border: none;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            background: linear-gradient(135deg, #2e9e6f 0%, #248760 100%);
+        }
+        .upload-btn:hover:not(:disabled) { filter: brightness(1.05); }
+        .upload-btn:disabled { opacity: 0.65; cursor: not-allowed; }
+        .llm-actions .switch-page-btn.warn {
+            background: linear-gradient(135deg, #e67e22 0%, #d35400 100%);
+        }
+        .llm-actions label.llm-check {
+            font-weight: 500;
+            color: #444;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .llm-actions input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; }
+        .status-message {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-size: 14px;
+            display: none;
+        }
+        .status-message.status-info { display: block; background: #d1ecf1; color: #0c637f; }
+        .status-message.status-success { display: block; background: #d4edda; color: #155724; }
+        .status-message.status-error { display: block; background: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <button id="back-btn">返回主页</button>
+    <div id="app"></div>
+    <script>
+        (function () {
+            var m = document.querySelector('meta[name="live2d-api-origin"]');
+            var o = (m && m.content && String(m.content).trim())
+                ? String(m.content).trim().replace(/\/$/, "")
+                : "http://localhost:8000";
+            window.__LIVE2D_API_BASE__ = o + "/api";
+        })();
+        const API_BASE = window.__LIVE2D_API_BASE__;
+
+        /** 兼容统一封装 { code, message, data } 与裸 JSON */
+        function unwrapApi(result, errMsg) {
+            if (result && typeof result.code === "number") {
+                if (result.code !== 0) throw new Error(result.message || errMsg);
+                return result.data;
+            }
+            return result;
+        }
+
+        /** HTTP 错误时读取 FastAPI ``detail`` */
+        async function parseApiResponse(response, errMsg) {
+            let result = null;
+            try {
+                result = await response.json();
+            } catch {
+                if (!response.ok) throw new Error(errMsg || "请求失败 " + response.status);
+                return null;
+            }
+            if (!response.ok) {
+                let msg = errMsg || "请求失败";
+                const d = result && result.detail;
+                if (typeof d === "string") msg = d;
+                else if (Array.isArray(d) && d.length)
+                    msg = d.map((x) => (x.msg ? x.msg : JSON.stringify(x))).join("; ");
+                throw new Error(msg);
+            }
+            return unwrapApi(result, errMsg);
+        }
+
+        async function getModelPackages(userId) {
+            const response = await fetch(`${API_BASE}/live2d-model-assets/packages?user_id=${userId}`);
+            const result = await response.json();
+            return unwrapApi(result, "获取模型包列表失败");
+        }
+
+        /** 该用户已保存的全部包级人设（含 character_desc / tone_style） */
+        async function listPackageBoundPersonas(userId) {
+            const response = await fetch(`${API_BASE}/personas/package-bound?user_id=${userId}`);
+            const result = await response.json();
+            return unwrapApi(result, "读取已保存人设列表失败") || [];
+        }
+
+        async function getCharacterDef(userId, packageKey) {
+            const url = `${API_BASE}/personas/by-package/${encodeURIComponent(packageKey)}?user_id=${userId}`;
+            const response = await fetch(url);
+            const result = await response.json();
+            return unwrapApi(result, "读取角色定义失败");
+        }
+
+        async function saveCharacterDef(userId, packageKey, characterDesc, toneStyle, expandWithLlm) {
+            const url = `${API_BASE}/personas/by-package/${encodeURIComponent(packageKey)}?user_id=${userId}`;
+            const response = await fetch(url, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    character_desc: characterDesc,
+                    tone_style: toneStyle,
+                    expand_with_llm: !!expandWithLlm,
+                }),
+            });
+            return parseApiResponse(response, "保存失败");
+        }
+
+        /** POST：仅扩写预览，不入库 */
+        async function requestPersonaExpandFromHints(characterHint, toneHint) {
+            const response = await fetch(`${API_BASE}/personas/expand-from-hints`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    character_hint: characterHint || "",
+                    tone_hint: toneHint || "",
+                }),
+            });
+            return parseApiResponse(response, "AI 扩写失败");
+        }
+
+        class CharacterDefEditor {
+            constructor(containerId, userId) {
+                this.root = document.getElementById(containerId);
+                this.userId = userId;
+                this.saving = false;
+                this.init();
+            }
+
+            init() {
+                this.root.innerHTML = `
+                    <div class="upload-container">
+                        <h2>模型角色定义</h2>
+                        <p class="hint">
+                            数据写入<strong>人设表 persona</strong>（<code>user_id</code> + <code>package_key</code>）。<strong>语气风格</strong>（<code>tone_style</code>）与<strong>角色设定</strong>（<code>character_desc</code>）会用于两处：① 文字大模型 system（与 <code>OLLAMA_CHAT_SYSTEM</code> 叠加）；② 使用 <strong>MiMo</strong> 朗读时：<strong>system</strong> 固定为「你是语音合成助手，请按照【人设】与【语气】合成语音。」，<strong>user</strong> 侧带【人设】←角色设定、【语气】←语气说明。建议在 <code>character_desc</code> 中写明<strong>背景故事</strong>（关键经历或情境锚点），与身份性格分开成段；勿在正文内再写「【人设】」等标签，以免与外层叠套。
+                            <br /><br />
+                            <strong>场景由对话历史承担</strong>：服务端会把 Redis 中的近期 user/assistant 对话与<strong>本轮用户输入</strong>一并写入 MiMo 的【场景】，无需在表里重复粘贴聊天记录。
+                            <br /><br />
+                            语速、气息、重音等宜写在<strong>语气风格</strong>（入库「【语气】」）或角色正文叙述中；勿在 <code>character_desc</code> 内手写「【人设】」「【语气】」标签。模型回复正文若含 MiMo 支持的 <code>(风格)</code> 与 <code>[音频标签]</code>，请写在<strong>待合成对白</strong>（assistant content）中。
+                        </p>
+                        <div class="page-actions">
+                            <button type="button" id="toModelBtn" class="switch-page-btn">模型资源上传</button>
+                            <button type="button" id="toTtsBtn" class="switch-page-btn secondary">音色资源上传</button>
+                        </div>
+                        <div class="status-message" id="statusMessage"></div>
+                        <div class="upload-section">
+                            <div class="form-group">
+                                <label for="packageSelect">选择模型包</label>
+                                <select id="packageSelect"></select>
+                            </div>
+                            <div class="form-group" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                                <button type="button" id="reloadBtn" class="switch-page-btn" style="background:linear-gradient(135deg,#5a6268,#3d4449);">重新加载当前包</button>
+                                <span style="font-size:13px;color:#666;">从服务器再次拉取已保存的语气与角色正文</span>
+                            </div>
+                            <div class="form-group">
+                                <label for="toneStyle">语气风格 <span style="color:#c0392b;">*</span>（tone_style，MiMo user【语气】）</label>
+                                <input type="text" id="toneStyle" maxlength="50" placeholder="可直接写完整指导（≤50字）；或写几个字 + 下方「扩写预览」/ 保存时 AI 扩写" />
+                            </div>
+                            <div class="form-group">
+                                <label for="roleText">角色设定（character_desc，写入 LLM + MiMo user【人设】）</label>
+                                <textarea id="roleText" placeholder="建议含两块：身份/性格/说话习惯；另起一段以「背景故事」开头写简短过往或关键经历（AI 扩写会自动按此结构生成）。勿在正文里写【人设】——服务端会统一包进 MiMo【人设】。语速等综合指导写在语气风格框（【语气】）。"></textarea>
+                            </div>
+                            <div class="form-group llm-actions">
+                                <label>AI 辅助扩写（默认本地 Ollama；服务端设置 PERSONA_EXPAND_BACKEND=openai 可走 OpenAI 兼容联网接口）</label>
+                                <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:8px;">
+                                    <button type="button" id="expandPreviewBtn" class="switch-page-btn warn">扩写预览并填入表单</button>
+                                    <label class="llm-check">
+                                        <input type="checkbox" id="expandOnSave" />
+                                        保存时用 AI 扩写后再写入数据库
+                                    </label>
+                                </div>
+                                <p class="hint" style="margin:0;font-size:13px;color:#666;">
+                                    「扩写预览」根据当前<strong>角色设定</strong>与<strong>语气风格</strong>框内的文字（可仅几个字）生成完整正文并填入。
+                                    勾选「保存时扩写」时，请将语气框内容作为<strong>关键词</strong>（最长 200 字），保存后会先经模型扩写再入库（语气入库仍 ≤50 字）。
+                                </p>
+                            </div>
+                            <button type="button" class="upload-btn" id="saveBtn">保存本包角色定义</button>
+                            <div class="form-group" style="margin-top:20px;">
+                                <label>已保存人设的包（可核对库中是否已有正文）</label>
+                                <pre id="savedList" style="margin:0;padding:12px;background:#fff;border:1px solid #e0e0e0;border-radius:8px;font-size:13px;line-height:1.45;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#444;">加载中…</pre>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                this.root.querySelector("#toModelBtn").addEventListener("click", () => {
+                    location.href = "./assetUpload.html";
+                });
+                this.root.querySelector("#toTtsBtn").addEventListener("click", () => {
+                    location.href = "./ttsUpload.html";
+                });
+                this.root.querySelector("#packageSelect").addEventListener("change", () => this.loadCurrent());
+                this.root.querySelector("#reloadBtn").addEventListener("click", () => this.loadCurrent());
+                this.root.querySelector("#saveBtn").addEventListener("click", () => this.save());
+                const expandCb = this.root.querySelector("#expandOnSave");
+                expandCb.addEventListener("change", () => this.syncToneMaxLength());
+                this.root.querySelector("#expandPreviewBtn").addEventListener("click", () => this.previewExpand());
+                this.syncToneMaxLength();
+                this.loadPackages();
+            }
+
+            syncToneMaxLength() {
+                const cb = this.root.querySelector("#expandOnSave");
+                const tone = this.root.querySelector("#toneStyle");
+                if (!cb || !tone) return;
+                tone.maxLength = cb.checked ? 200 : 50;
+            }
+
+            showStatus(message, type) {
+                const el = this.root.querySelector("#statusMessage");
+                el.textContent = message;
+                el.className = `status-message status-${type}`;
+                setTimeout(() => {
+                    el.textContent = "";
+                    el.className = "status-message";
+                }, 5000);
+            }
+
+            async loadPackages() {
+                const sel = this.root.querySelector("#packageSelect");
+                try {
+                    const packages = await getModelPackages(this.userId);
+                    if (!packages.length) {
+                        sel.innerHTML = `<option value="">暂无模型包，请先去上传模型</option>`;
+                        this.root.querySelector("#toneStyle").disabled = true;
+                        this.root.querySelector("#roleText").disabled = true;
+                        this.root.querySelector("#saveBtn").disabled = true;
+                        const ep = this.root.querySelector("#expandPreviewBtn");
+                        if (ep) ep.disabled = true;
+                        await this.refreshSavedList();
+                        return;
+                    }
+                    sel.innerHTML = packages
+                        .map((p) => `<option value="${p.package_key}">${p.package_key}</option>`)
+                        .join("");
+                    this.root.querySelector("#toneStyle").disabled = false;
+                    this.root.querySelector("#roleText").disabled = false;
+                    this.root.querySelector("#saveBtn").disabled = false;
+                    const epOk = this.root.querySelector("#expandPreviewBtn");
+                    if (epOk) epOk.disabled = false;
+                    await this.refreshSavedList();
+                    await this.loadCurrent();
+                } catch (e) {
+                    sel.innerHTML = `<option value="">加载失败</option>`;
+                    const pre = this.root.querySelector("#savedList");
+                    if (pre) pre.textContent = "无法加载";
+                    this.showStatus(e.message, "error");
+                }
+            }
+
+            async refreshSavedList() {
+                const pre = this.root.querySelector("#savedList");
+                if (!pre) return;
+                try {
+                    const rows = await listPackageBoundPersonas(this.userId);
+                    if (!rows.length) {
+                        pre.textContent = "（暂无已保存的包级人设）";
+                        return;
+                    }
+                    pre.textContent = rows
+                        .map((r) => {
+                            const pkg = r.package_key || "";
+                            const tone = (r.tone_style || "").trim();
+                            const desc = (r.character_desc || "").trim();
+                            const preview = desc.length > 120 ? desc.slice(0, 120) + "…" : desc;
+                            return `【${pkg}】语气：${tone || "（空）"}\n角色：${preview || "（空）"}\n`;
+                        })
+                        .join("\n");
+                } catch (e) {
+                    pre.textContent = "读取列表失败：" + e.message;
+                }
+            }
+
+            async loadCurrent() {
+                const sel = this.root.querySelector("#packageSelect");
+                const pkg = sel.value;
+                const ta = this.root.querySelector("#roleText");
+                const tone = this.root.querySelector("#toneStyle");
+                if (!pkg) {
+                    ta.value = "";
+                    tone.value = "";
+                    return;
+                }
+                try {
+                    this.showStatus("正在加载…", "info");
+                    const data = await getCharacterDef(this.userId, pkg);
+                    ta.value = data.character_desc || "";
+                    tone.value = data.tone_style || "";
+                    this.syncToneMaxLength();
+                    this.showStatus("已加载", "success");
+                } catch (e) {
+                    ta.value = "";
+                    tone.value = "";
+                    this.showStatus(e.message, "error");
+                }
+            }
+
+            async previewExpand() {
+                const pkg = this.root.querySelector("#packageSelect").value;
+                if (!pkg) {
+                    this.showStatus("请先选择模型包", "error");
+                    return;
+                }
+                const role = (this.root.querySelector("#roleText").value || "").trim();
+                const tone = (this.root.querySelector("#toneStyle").value || "").trim();
+                if (!role && !tone) {
+                    this.showStatus("请至少填写语气风格或角色设定中的一项（可作关键词）", "error");
+                    return;
+                }
+                const btn = this.root.querySelector("#expandPreviewBtn");
+                btn.disabled = true;
+                try {
+                    this.showStatus("正在请求 AI 扩写…", "info");
+                    const data = await requestPersonaExpandFromHints(role, tone);
+                    this.root.querySelector("#roleText").value = data.character_desc || "";
+                    this.root.querySelector("#toneStyle").value = data.tone_style || "";
+                    const cb = this.root.querySelector("#expandOnSave");
+                    if (cb) cb.checked = false;
+                    this.syncToneMaxLength();
+                    this.showStatus("已填入扩写结果，可编辑后保存", "success");
+                } catch (e) {
+                    this.showStatus(e.message, "error");
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async save() {
+                if (this.saving) return;
+                const pkg = this.root.querySelector("#packageSelect").value;
+                if (!pkg) {
+                    this.showStatus("请先选择模型包", "error");
+                    return;
+                }
+                const text = this.root.querySelector("#roleText").value;
+                const tone = this.root.querySelector("#toneStyle").value.trim();
+                const expandOnSave = !!this.root.querySelector("#expandOnSave").checked;
+                if (!tone) {
+                    this.showStatus("请填写语气风格（tone_style）", "error");
+                    return;
+                }
+                if (!expandOnSave && tone.length > 50) {
+                    this.showStatus("语气风格不超过 50 字；或勾选「保存时用 AI 扩写」以输入更长关键词", "error");
+                    return;
+                }
+                if (expandOnSave && tone.length > 200) {
+                    this.showStatus("保存扩写模式下语气关键词最长 200 字", "error");
+                    return;
+                }
+                this.saving = true;
+                const btn = this.root.querySelector("#saveBtn");
+                btn.disabled = true;
+                try {
+                    await saveCharacterDef(this.userId, pkg, text, tone, expandOnSave);
+                    this.showStatus(
+                        expandOnSave ? `已保存（含 AI 扩写）：${pkg}` : `已保存：${pkg}`,
+                        "success"
+                    );
+                    await this.refreshSavedList();
+                    await this.loadCurrent();
+                } catch (e) {
+                    this.showStatus(e.message, "error");
+                } finally {
+                    this.saving = false;
+                    btn.disabled = false;
+                }
+            }
+        }
+
+        document.addEventListener("DOMContentLoaded", () => {
+            new CharacterDefEditor("app", 1);
+            const backBtn = document.getElementById("back-btn");
+            if (backBtn) {
+                backBtn.addEventListener("click", () => {
+                    location.href = "../../index.html";
+                });
+            }
+        });
+    </script>
+</body>
+</html>

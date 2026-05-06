@@ -1,0 +1,26 @@
+# ollama>=0.6.0
+# python-dotenv>=1.0.0
+# dashscope>=1.20.0
+
+# HTTP / 数据库 API（live2d_db）
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pymysql>=1.1.0
+redis>=5.0.0
+pydantic>=2.0.0
+minio>=7.2.0
+python-multipart>=0.0.26
+
+# 系统依赖：参考音频上传（非标准 WAV）与 MiMo/GPT-SoVITS 运行时转码需已安装 ffmpeg，并在 PATH 中可用（Windows: winget install ffmpeg）。
+
+# torch==2.0.1 
+# torchvision==0.15.2 
+# torchaudio==2.0.2 
+# # --index-url https://download.pytorch.org/whl/cu118
+
+# # pyaudio是pyaudio的库，用于音频处理
+# pyaudio
+
+
+# # pip install -U kokoro>=0.8.2 "misaki[zh]>=0.8.2" soundfile numpy
+# # pip install pywin32  

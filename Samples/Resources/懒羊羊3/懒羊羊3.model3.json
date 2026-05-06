@@ -1,0 +1,54 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "懒羊羊3.moc3",
+		"Textures": [
+			"懒羊羊3.1024/texture_00.png"
+		],
+		"Physics": "懒羊羊3.physics3.json",
+		"DisplayInfo": "懒羊羊3.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "哭",
+				"File": "expressions/expression1.exp3.json"
+			},
+			{
+				"Name": "大哭",
+				"File": "expressions/expression2.exp3.json"
+			},
+			{
+				"Name": "赞",
+				"File": "expressions/expression3.exp3.json"
+			},
+			{
+				"Name": "生气",
+				"File": "expressions/expression4.exp3.json"
+			},
+			{
+				"Name": "游戏机",
+				"File": "expressions/expression5.exp3.json"
+			},
+			{
+				"Name": "可乐",
+				"File": "expressions/expression6.exp3.json"
+			}
+		]
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"ParamMouthOpenY"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		}
+	]
+}

@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- 云端部署：填写后端 HTTP 根地址（无路径），例 https://your-host:8000；留空则用 localhost:8000 -->
+    <meta name="live2d-api-origin" content="">
+    <title>音色资源上传</title>
+    <style>
+        #back-btn {
+            position: fixed;
+            top: 22px;
+            left: 22px;
+            height: 44px;
+            padding: 0 20px;
+            border: 1px solid rgba(255, 255, 255, 0.35);
+            border-radius: 22px;
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            background: linear-gradient(145deg, #4a5568, #2d3548);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+            z-index: 100;
+        }
+
+        #back-btn:hover {
+            filter: brightness(1.1);
+        }
+
+        .upload-container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        h2 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 24px;
+            border-bottom: 2px solid #6f42c1;
+            padding-bottom: 10px;
+        }
+
+        .page-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 16px;
+        }
+
+        .switch-page-btn {
+            height: 38px;
+            padding: 0 16px;
+            border: none;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            background: linear-gradient(135deg, #4a90d9 0%, #357abd 100%);
+        }
+
+        .upload-section,
+        .assets-section {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 24px;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+            font-size: 14px;
+        }
+
+        .form-group input[type="text"],
+        .form-group select {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            box-sizing: border-box;
+            background: #fff;
+        }
+
+        .form-group input[type="file"] {
+            display: none;
+        }
+
+        .form-group input[type="file"] + label {
+            display: inline-block;
+            padding: 12px 24px;
+            color: #fff;
+            border-radius: 8px;
+            cursor: pointer;
+            background: linear-gradient(135deg, #6f42c1 0%, #5a32a3 100%);
+        }
+
+        .file-info {
+            display: block;
+            margin-top: 8px;
+            font-size: 13px;
+            color: #666;
+            font-style: italic;
+        }
+
+        .upload-btn {
+            width: 100%;
+            padding: 14px 24px;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+        }
+
+        .status-message {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            display: none;
+        }
+
+        .status-message.status-info {
+            display: block;
+            background: #d1ecf1;
+            color: #0c637f;
+        }
+
+        .status-message.status-success {
+            display: block;
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-message.status-error {
+            display: block;
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .refer-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .refer-item {
+            background: #fff;
+            border-radius: 8px;
+            padding: 12px;
+            border: 1px solid #e5e5e5;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        .empty-message {
+            color: #888;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <button id="back-btn">返回主页</button>
+    <div id="uploaderContainer"></div>
+
+    <script>
+        (function () {
+            var m = document.querySelector('meta[name="live2d-api-origin"]');
+            var o = (m && m.content && String(m.content).trim())
+                ? String(m.content).trim().replace(/\/$/, "")
+                : "http://localhost:8000";
+            window.__LIVE2D_API_BASE__ = o + "/api";
+        })();
+        const API_BASE = window.__LIVE2D_API_BASE__;
+
+        async function getModelPackages(userId) {
+            const response = await fetch(`${API_BASE}/live2d-model-assets/packages?user_id=${userId}`);
+            const result = await response.json();
+            if (result.code !== 0) {
+                throw new Error(result.message || "获取模型包列表失败");
+            }
+            return result.data;
+        }
+
+        async function getTtsRefers(userId) {
+            const response = await fetch(`${API_BASE}/live2d-tts-refers?user_id=${userId}`);
+            if (response.status === 404) {
+                throw new Error("后端未启用 /api/live2d-tts-refers 接口");
+            }
+            const result = await response.json();
+            if (result.code !== 0) {
+                throw new Error(result.message || "获取音色配置失败");
+            }
+            return result.data;
+        }
+
+        async function uploadTtsReferAudio(userId, packageKey, audioFile, promptText, promptLanguage) {
+            const formData = new FormData();
+            formData.append("user_id", String(userId));
+            formData.append("package_key", packageKey);
+            formData.append("prompt_text", promptText);
+            formData.append("prompt_language", promptLanguage || "zh");
+            formData.append("refer_audio", audioFile);
+
+            const response = await fetch(`${API_BASE}/live2d-tts-refers/upload`, {
+                method: "POST",
+                body: formData
+            });
+            if (response.status === 404) {
+                throw new Error("后端未启用 /api/live2d-tts-refers/upload 接口");
+            }
+            const result = await response.json();
+            if (result.code !== 0) {
+                throw new Error(result.message || "上传音色参考失败");
+            }
+            return result.data;
+        }
+
+        class TtsUploader {
+            constructor(containerId, userId = 1) {
+                this.container = document.getElementById(containerId);
+                this.userId = userId;
+                this.init();
+            }
+
+            init() {
+                this.container.innerHTML = `
+                    <div class="upload-container">
+                        <h2>音色资源上传</h2>
+                        <p style="color:#555;font-size:14px;line-height:1.5;margin:-8px 0 16px;">
+                            上传短音频并填写与音频一致的朗读文本，用于 <strong>GPT-SoVITS 本地样本复刻</strong>（任意音色）。
+                            服务端设置 <code>TTS_PROVIDER=clone</code> 或 <code>auto</code> 时将优先使用此处绑定。
+                            若仅用小米 MiMo 预置音色且不需复刻，可不绑定此处。
+                        </p>
+                        <div class="page-actions" style="flex-wrap: wrap; gap: 10px;">
+                            <button id="toModelUploadBtn" class="switch-page-btn">前往模型资源上传</button>
+                            <button id="toCharacterDefBtn" class="switch-page-btn" style="background: linear-gradient(135deg, #2e9e6f 0%, #248760 100%);">模型角色定义</button>
+                        </div>
+                        <div class="status-message" id="statusMessage"></div>
+                        <div class="upload-section">
+                            <div class="form-group">
+                                <label for="packageKey">选择模型包</label>
+                                <select id="packageKey"></select>
+                            </div>
+                            <div class="form-group">
+                                <label for="promptText">参考文本 (prompt_text)</label>
+                                <input type="text" id="promptText" placeholder="例如：你好，欢迎使用音色配置。" />
+                            </div>
+                            <div class="form-group">
+                                <label for="promptLanguage">参考语种</label>
+                                <input type="text" id="promptLanguage" value="zh" />
+                            </div>
+                            <div class="form-group">
+                                <label for="audioFile">选择参考音频</label>
+                                <input type="file" id="audioFile" accept=".wav,.mp3,.ogg,.m4a,.flac,.aac,audio/*" />
+                                <span class="file-info" id="audioFileInfo">未选择文件</span>
+                                <p style="color:#666;font-size:12px;margin:6px 0 0;">
+                                    支持 wav/mp3/ogg/m4a/flac/aac；若 wav 非标准 RIFF/PCM，服务端会用 ffmpeg 转为标准 WAV 再存储（需服务器已安装 ffmpeg 并在 PATH 中）。
+                                </p>
+                            </div>
+                            <button id="uploadBtn" class="upload-btn">上传音色参考</button>
+                        </div>
+                        <div class="assets-section">
+                            <h3>已配置音色</h3>
+                            <div id="referList" class="refer-list"></div>
+                        </div>
+                    </div>
+                `;
+
+                this.setupEventListeners();
+                this.loadAll();
+            }
+
+            setupEventListeners() {
+                const audioFileInput = this.container.querySelector("#audioFile");
+                audioFileInput.addEventListener("change", (e) => {
+                    const file = e.target.files && e.target.files[0];
+                    this.container.querySelector("#audioFileInfo").textContent = file ? file.name : "未选择文件";
+                });
+
+                this.container.querySelector("#uploadBtn").addEventListener("click", () => this.handleUpload());
+
+                this.container.querySelector("#toModelUploadBtn").addEventListener("click", () => {
+                    location.href = "./assetUpload.html";
+                });
+                const toCharacterDefBtn = this.container.querySelector("#toCharacterDefBtn");
+                if (toCharacterDefBtn) {
+                    toCharacterDefBtn.addEventListener("click", () => {
+                        location.href = "./characterDef.html";
+                    });
+                }
+            }
+
+            async loadAll() {
+                await Promise.all([this.loadPackages(), this.loadRefers()]);
+            }
+
+            async loadPackages() {
+                const select = this.container.querySelector("#packageKey");
+                try {
+                    const packages = await getModelPackages(this.userId);
+                    if (!packages.length) {
+                        select.innerHTML = `<option value="">暂无模型包，请先去模型页上传</option>`;
+                        return;
+                    }
+                    select.innerHTML = packages
+                        .map((pkg) => `<option value="${pkg.package_key}">${pkg.package_key}</option>`)
+                        .join("");
+                } catch (error) {
+                    select.innerHTML = `<option value="">加载失败</option>`;
+                    this.showStatus(error.message, "error");
+                }
+            }
+
+            async loadRefers() {
+                const list = this.container.querySelector("#referList");
+                try {
+                    const refers = await getTtsRefers(this.userId);
+                    if (!refers.length) {
+                        list.innerHTML = `<p class="empty-message">暂无音色配置</p>`;
+                        return;
+                    }
+                    list.innerHTML = refers
+                        .map((item) => `
+                            <div class="refer-item">
+                                <div><strong>包名：</strong>${item.package_key}</div>
+                                <div><strong>语种：</strong>${item.prompt_language}</div>
+                                <div><strong>文本：</strong>${item.prompt_text}</div>
+                            </div>
+                        `)
+                        .join("");
+                } catch (error) {
+                    list.innerHTML = `<p class="empty-message">${error.message}</p>`;
+                    this.showStatus(error.message, "error");
+                }
+            }
+
+            async handleUpload() {
+                const packageKey = this.container.querySelector("#packageKey").value.trim();
+                const promptText = this.container.querySelector("#promptText").value.trim();
+                const promptLanguage = this.container.querySelector("#promptLanguage").value.trim() || "zh";
+                const audioFile = this.container.querySelector("#audioFile").files[0];
+
+                if (!packageKey) {
+                    this.showStatus("请先选择模型包", "error");
+                    return;
+                }
+                if (!promptText) {
+                    this.showStatus("请填写参考文本", "error");
+                    return;
+                }
+                if (!audioFile) {
+                    this.showStatus("请选择参考音频", "error");
+                    return;
+                }
+
+                try {
+                    this.showStatus("正在上传音色参考...", "info");
+                    const result = await uploadTtsReferAudio(
+                        this.userId,
+                        packageKey,
+                        audioFile,
+                        promptText,
+                        promptLanguage
+                    );
+                    this.showStatus(`上传成功：${result.package_key}`, "success");
+                    this.container.querySelector("#audioFile").value = "";
+                    this.container.querySelector("#audioFileInfo").textContent = "未选择文件";
+                    await this.loadRefers();
+                } catch (error) {
+                    this.showStatus(error.message, "error");
+                }
+            }
+
+            showStatus(message, type = "info") {
+                const statusEl = this.container.querySelector("#statusMessage");
+                statusEl.textContent = message;
+                statusEl.className = `status-message status-${type}`;
+            }
+        }
+
+        document.addEventListener("DOMContentLoaded", () => {
+            new TtsUploader("uploaderContainer", 1);
+            const backBtn = document.getElementById("back-btn");
+            backBtn.addEventListener("click", () => {
+                location.href = "../../index.html";
+            });
+        });
+    </script>
+</body>
+</html>

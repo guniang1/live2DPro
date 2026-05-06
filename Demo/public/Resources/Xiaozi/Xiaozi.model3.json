@@ -1,0 +1,112 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "Purple紫.moc3",
+		
+		"Textures": [
+			"Purple紫.4096/texture_00.png",
+			"Purple紫.4096/texture_01.png",
+			"Purple紫.4096/texture_02.png",
+			"Purple紫.4096/texture_03.png",
+			"Purple紫.4096/texture_04.png"
+		],
+		"Physics": "Purple紫.physics3.json",
+		"DisplayInfo": "Purple紫.cdi3.json",
+		"Expressions": [
+			{"Name": "1发饰1", "File": "expressions/1发饰1.exp3.json"},
+			{"Name": "1发饰2", "File": "expressions/1发饰2.exp3.json"},
+			{"Name": "1发饰3", "File": "expressions/1发饰3.exp3.json"},
+			{"Name": "1发饰4", "File": "expressions/1发饰4.exp3.json"},
+			{"Name": "1星星眼", "File": "expressions/1星星眼.exp3.json"},
+			{"Name": "1帽子", "File": "expressions/1帽子.exp3.json"},
+			{"Name": "1猫耳", "File": "expressions/1猫耳.exp3.json"},
+			{"Name": "1流泪", "File": "expressions/1流泪.exp3.json"},
+			{"Name": "1流汗", "File": "expressions/1流汗.exp3.json"},
+			{"Name": "1白眼", "File": "expressions/1白眼.exp3.json"},
+			{"Name": "1黑脸", "File": "expressions/1黑脸.exp3.json"},
+			{"Name": "1生气", "File": "expressions/1生气.exp3.json"},
+			{"Name": "1血", "File": "expressions/1血.exp3.json"},
+			{"Name": "2刀", "File": "expressions/2刀.exp3.json"},
+			{"Name": "2麦克风", "File": "expressions/2麦克风.exp3.json"},
+			{"Name": "2游戏机", "File": "expressions/2游戏机.exp3.json"},
+			{"Name": "3毛衣", "File": "expressions/3毛衣.exp3.json"},
+			{"Name": "刘海", "File": "expressions/刘海.exp3.json"},
+			{"Name": "双马尾长度", "File": "expressions/双马尾长度.exp3.json"},
+			{"Name": "侧发长度", "File": "expressions/侧发长度.exp3.json"},
+			{"Name": "后发短", "File": "expressions/后发短.exp3.json"},
+			{"Name": "变小", "File": "expressions/变小.exp3.json"},
+			{"Name": "头", "File": "expressions/头.exp3.json"},
+			{"Name": "呆毛1", "File": "expressions/呆毛1.exp3.json"},
+			{"Name": "呆毛2", "File": "expressions/呆毛2.exp3.json"},
+			{"Name": "耳朵去掉", "File": "expressions/耳朵去掉.exp3.json"},
+			{"Name": "吐出舌头切换", "File": "expressions/吐出舌头切换.exp3.json"},
+			{"Name": "泡泡", "File": "expressions/泡泡.exp3.json"},
+			{"Name": "尾巴朝上", "File": "expressions/尾巴朝上.exp3.json"}
+		],
+		"Motions": {
+			"Idle": [
+				{"File": "motions/待机动画.motion3.json"}
+			],
+			"TapBody": [
+				{"File": "motions/泡泡动画.motion3.json"}
+			]
+		}
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": ["ParamEyeLOpen", "ParamEyeROpen"]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": []
+		}
+	],
+	"HitAreas": [
+		{"Id": "ArtMesh", "Name": "Head"},
+		{"Id": "ArtMesh2", "Name": "Head"},
+		{"Id": "ArtMesh3", "Name": "Head"},
+		{"Id": "ArtMesh14", "Name": "Head"},
+		{"Id": "ArtMesh15", "Name": "Head"},
+		{"Id": "ArtMesh16", "Name": "Head"},
+		{"Id": "ArtMesh17", "Name": "Head"},
+		{"Id": "ArtMesh20", "Name": "Head"},
+		{"Id": "ArtMesh21", "Name": "Head"},
+		{"Id": "ArtMesh22", "Name": "Head"},
+		{"Id": "ArtMesh23", "Name": "Head"},
+		{"Id": "ArtMesh24", "Name": "Head"},
+		{"Id": "ArtMesh25", "Name": "Head"},
+		{"Id": "ArtMesh26", "Name": "Head"},
+		{"Id": "ArtMesh27", "Name": "Head"},
+		{"Id": "ArtMesh28", "Name": "Head"},
+		{"Id": "ArtMesh29", "Name": "Head"},
+		{"Id": "ArtMesh58", "Name": "Head"},
+		{"Id": "ArtMesh59", "Name": "Head"},
+		{"Id": "ArtMesh60", "Name": "Head"},
+		{"Id": "ArtMesh50", "Name": "Body"},
+		{"Id": "ArtMesh51", "Name": "Body"},
+		{"Id": "ArtMesh52", "Name": "Body"},
+		{"Id": "ArtMesh53", "Name": "Body"},
+		{"Id": "ArtMesh54", "Name": "Body"},
+		{"Id": "ArtMesh55", "Name": "Body"},
+		{"Id": "ArtMesh56", "Name": "Body"},
+		{"Id": "ArtMesh57", "Name": "Body"},
+		{"Id": "ArtMesh76", "Name": "Body"},
+		{"Id": "ArtMesh77", "Name": "Body"},
+		{"Id": "ArtMesh78", "Name": "Body"},
+		{"Id": "ArtMesh79", "Name": "Body"},
+		{"Id": "ArtMesh80", "Name": "Body"},
+		{"Id": "ArtMesh81", "Name": "Body"},
+		{"Id": "ArtMesh82", "Name": "Body"},
+		{"Id": "ArtMesh83", "Name": "Body"},
+		{"Id": "ArtMesh84", "Name": "Body"},
+		{"Id": "ArtMesh85", "Name": "Body"},
+		{"Id": "ArtMesh86", "Name": "Body"},
+		{"Id": "ArtMesh87", "Name": "Body"},
+		{"Id": "ArtMesh88", "Name": "Body"},
+		{"Id": "ArtMesh89", "Name": "Body"},
+		{"Id": "ArtMesh90", "Name": "Body"}
+	]
+}

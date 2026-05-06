@@ -1,0 +1,30 @@
+# Secrets & local env
+.env
+**/.env
+*.local
+
+# JS / Node
+**/node_modules/
+Demo/dist/
+
+# Python
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Large vendored runtimes / models (prepare locally; see README)
+PY/GPT-SoVITS-beta0706/
+PY/ffmpeg-8.1.1/
+
+# Local services / artifacts
+minio_data/
+_internal/
+
+# IDE / tooling (personal)
+.cursor/
+.vscode/
+
+# OS
+Thumbs.db
+Desktop.ini
