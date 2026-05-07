@@ -1,11 +1,15 @@
 """
-进程内按「user_id + package_key」缓存 Live2dCatalog（懒加载 + MySQL 查询）。
-启动时 init_catalog() 可预热默认用户/默认包；WebSocket 通过 query ?package= + ?user_id 取候选。
+进程内按「user_id + package_key」缓存 Live2dCatalog；WebSocket 通过 query ?package= + ?user_id 取候选。
 
-数据来源：
-- 仅来自 MySQL 表 live2d_model_asset
-- 表情：asset_type=exp3 或 relative_path 后缀 .exp3.json
-- 动作：asset_type=motion3 或 relative_path 后缀 .motion3.json
+数据来源（命中顺序）：
+1. 进程内 dict ``_catalog_by_package``
+2. **Redis** 字符串 JSON（键前缀默认 ``live2d:catalog``，TTL 默认 7 天，见环境变量）
+3. **MySQL** 表 ``live2d_model_asset``（成功后回写 Redis）
+
+表情：asset_type=exp3 或 relative_path 后缀 .exp3.json
+动作：asset_type=motion3 或 relative_path 后缀 .motion3.json
+
+本地 Resources 目录不再扫描；``resources_root`` 字段仅为兼容保留。
 """
 
 from __future__ import annotations
@@ -14,10 +18,12 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import logging
 from live2d_db.connection import connection_ctx
 from live2d_db.db_config import DbConfig
+from live2d_db.package_key_util import normalize_package_key
 from live2d_db.repositories import Live2dModelAssetRepository
 
 logger = logging.getLogger(__name__)
@@ -74,7 +80,7 @@ class Live2dCatalog:
             sample_block = (
                 "JSON 键须包含 **reason、expression、motion**。\n"
                 "下方示例仅演示**合法字段名与 JSON 形状**；其中 expression、motion 各取自本包真实标识名一条。"
-                "**禁止**输出「某表情标识名」「某动作标识名」等占位词，也**禁止**照抄示例里具体的表情/动作（须按用户话另选上表中的项）。\n"
+                "**禁止**输出「某表情标识名」「某动作标识名」等占位词，也**禁止**照抄示例里具体的表情/动作（须按对话情境为**虚拟角色**另选上表中的项）。\n"
                 f"形状示例：\n{sample_line}"
             )
         else:
@@ -85,10 +91,13 @@ class Live2dCatalog:
             )
         return (
             self.llm_context_text
-            + "\n\n你的任务：只根据用户发的一句话，从上述标识名中为**表情、动作各选一个**。\n"
+            + "\n\n你的任务：综合消息里的「人设参考」「最近对话（若有）」与「本轮用户输入」，判断 **Live2D 虚拟角色（助手）** "
+            "在当下对话中应表现出的神态与肢体，从上述标识名中为该**角色**的**表情、动作各选一个**。\n"
+            "**选题对象**：expression / motion **只描述角色自身的演绎资源**，表现角色对用户话语与会谈氛围的反应；"
+            "**绝不**表示真人用户此刻的表情或动作，也不要把「用户在做的事」直接映射成角色的 motion。\n"
             "**硬性规则**：键 **expression** 与 **motion** 的值都必须是各自表中存在的标识名字符串；"
             "**禁止**只填一侧、另一侧写空字符串 \"\"；也**禁止**用「与表情无关」「只选动作」等理由故意留空 expression。"
-            "若用户话与某一侧较难对应，该侧仍须从表中选一个**中性、通用**的项（例如偏日常基础脸型类表情（吐舌头） + 待机/轻量类动作），不得留空，不得选择身体部位（头不是表情）。\n"
+            "若对话内容与某一侧较难对应，仍须为该**角色**从表中选一个**中性、通用**的项（例如偏日常基础脸型类表情 + 待机/轻量类动作），不得留空，不得选择身体部位（头不是表情）。\n"
             "重要：expression **只能**来自【表情】表；motion **只能**来自【动作】表；不要把动作路径/文件名写进 expression，"
             "不要把表情名写进 motion；motion 只写标识名（与表中一致），不要写带 motions/ 的路径。\n"
             "只输出**一个** JSON 对象（不要 markdown 代码块、不要 JSON 外的文字）。\n"
@@ -263,6 +272,106 @@ def build_catalog(
 _catalog_by_package: dict[tuple[int, str], Live2dCatalog] = {}
 
 
+def _catalog_redis_enabled() -> bool:
+    return (os.getenv("LIVE2D_CATALOG_REDIS_ENABLED") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+
+
+def _catalog_redis_ttl_seconds() -> int:
+    try:
+        n = int((os.getenv("LIVE2D_CATALOG_REDIS_TTL_SECONDS") or "604800").strip() or "604800")
+    except ValueError:
+        return 604800
+    return max(300, min(86400 * 30, n))
+
+
+def _catalog_redis_key(user_id: int, package_key: str) -> str:
+    pk = normalize_package_key(package_key, fallback="default")
+    pfx = (os.getenv("LIVE2D_CATALOG_REDIS_PREFIX") or "live2d:catalog").strip() or "live2d:catalog"
+    return f"{pfx}:{user_id}:{pk}"
+
+
+def _try_load_catalog_from_redis(
+    redis_cli: Any,
+    user_id: int,
+    package_key: str,
+    resources_root: Path,
+) -> Live2dCatalog | None:
+    try:
+        blob = redis_cli.get(_catalog_redis_key(user_id, package_key))
+        if not blob:
+            return None
+        data = json.loads(blob)
+        expr = data.get("expression_paths")
+        mot = data.get("motion_paths")
+        if not isinstance(expr, list) or not isinstance(mot, list):
+            return None
+        expr_paths = sorted({str(x).strip().lstrip("/") for x in expr if str(x).strip()})
+        mot_paths = sorted({str(x).strip().lstrip("/") for x in mot if str(x).strip()})
+        text = _build_llm_text(package_key, expr_paths, mot_paths)
+        return Live2dCatalog(
+            package_key=package_key,
+            resources_root=resources_root.resolve(),
+            expression_paths=expr_paths,
+            motion_paths=mot_paths,
+            llm_context_text=text,
+        )
+    except json.JSONDecodeError:
+        logger.warning(
+            "Live2D catalog Redis JSON 无效，将回退 MySQL user_id=%s package=%s",
+            user_id,
+            package_key,
+        )
+        return None
+    except Exception:
+        logger.exception(
+            "Live2D catalog Redis 读取异常，将回退 MySQL user_id=%s package=%s",
+            user_id,
+            package_key,
+        )
+        return None
+
+
+def _write_catalog_to_redis(redis_cli: Any, user_id: int, package_key: str, cat: Live2dCatalog) -> None:
+    try:
+        payload = json.dumps(
+            {"expression_paths": cat.expression_paths, "motion_paths": cat.motion_paths},
+            ensure_ascii=False,
+        )
+        redis_cli.setex(
+            _catalog_redis_key(user_id, package_key),
+            _catalog_redis_ttl_seconds(),
+            payload,
+        )
+    except Exception:
+        logger.exception("Live2D catalog 写 Redis 失败 user_id=%s package=%s", user_id, package_key)
+
+
+def invalidate_live2d_catalog_cache(user_id: int, package_key: str) -> None:
+    """在 ``live2d_model_asset`` 变更后调用：清理进程内缓存并删除 Redis catalog 键。"""
+    pk_norm = normalize_package_key(package_key, fallback="default")
+    for ck in list(_catalog_by_package.keys()):
+        if ck[0] != user_id:
+            continue
+        if normalize_package_key(ck[1], fallback="default") != pk_norm:
+            continue
+        _catalog_by_package.pop(ck, None)
+    if not _catalog_redis_enabled():
+        return
+    from live2d_db.redis_factory import get_redis_client
+
+    rc = get_redis_client(logger)
+    if rc is None:
+        return
+    try:
+        rc.delete(_catalog_redis_key(user_id, package_key))
+    except Exception:
+        logger.exception("Live2D catalog 删除 Redis 失败 user_id=%s package=%s", user_id, package_key)
+
+
 def get_catalog_for_package(
     package_key: str | None,
     *,
@@ -285,6 +394,26 @@ def get_catalog_for_package(
     root: Path | None = resources_root
     if root is None and root_env:
         root = Path(root_env)
+    base_root = (root or default_resources_root()).resolve()
+
+    rc = None
+    if _catalog_redis_enabled():
+        from live2d_db.redis_factory import get_redis_client
+
+        rc = get_redis_client(logger)
+        if rc is not None:
+            redis_cat = _try_load_catalog_from_redis(rc, uid, key, base_root)
+            if redis_cat is not None:
+                logger.info(
+                    "Live2D 资源已从 Redis 加载: user_id=%s package=%s expressions=%d motions=%d",
+                    uid,
+                    key,
+                    len(redis_cat.expression_paths),
+                    len(redis_cat.motion_paths),
+                )
+                _catalog_by_package[cache_key] = redis_cat
+                return redis_cat
+
     try:
         cat = build_catalog(uid, key, resources_root=root)
         logger.info(
@@ -295,11 +424,13 @@ def get_catalog_for_package(
             len(cat.motion_paths),
             DbConfig.from_env().database,
         )
+        if rc is not None:
+            _write_catalog_to_redis(rc, uid, key, cat)
     except Exception as e:
         logger.warning("Live2D 资源加载失败 user_id=%s package=%s: %s", uid, key, e)
         cat = Live2dCatalog(
             package_key=key,
-            resources_root=(root or default_resources_root()).resolve(),
+            resources_root=base_root,
             expression_paths=[],
             motion_paths=[],
             llm_context_text=(

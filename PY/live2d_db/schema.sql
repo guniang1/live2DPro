@@ -150,7 +150,7 @@ CREATE TABLE `long_memory` (
   `period_overview` TEXT COMMENT '周期对话概要（LLM 从 chat_session 压缩）',
   `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记忆创建时间',
   `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记忆更新时间',
-  `last_consolidate_time` DATETIME DEFAULT NULL COMMENT '上次长期固化时间',
+  `last_consolidate_time` DATETIME DEFAULT NULL COMMENT '上次周期概要更新时间',
   PRIMARY KEY (`memory_id`),
   UNIQUE KEY `uk_long_memory_user_pkg` (`user_id`, `package_key`),
   KEY `idx_memory_user` (`user_id`),
@@ -163,13 +163,13 @@ CREATE TABLE `remind_trigger` (
   `user_id` INT NOT NULL COMMENT '关联用户ID',
   `trigger_type` VARCHAR(30) NOT NULL COMMENT '触发类型(生日/考试/纪念日/日常关怀)',
   `trigger_time` DATETIME NOT NULL COMMENT '触发时间',
-  `memory_id` BIGINT DEFAULT NULL COMMENT '关联记忆ID',
-  `trigger_content` TEXT NOT NULL COMMENT '关怀文案内容',
+  `session_id` BIGINT DEFAULT NULL COMMENT '关联 chat_session：产生该提醒的单轮对话，投递话术据此召回语境',
+  `trigger_content` TEXT NOT NULL COMMENT '情景详细描述（触发时结合语境生成话术，非最终台词）',
   `is_triggered` TINYINT NOT NULL DEFAULT 0 COMMENT '是否触发(0-未触发 1-已触发)',
   `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   PRIMARY KEY (`trigger_id`),
   KEY `idx_trigger_user` (`user_id`),
   KEY `idx_trigger_time` (`trigger_time`, `is_triggered`),
   CONSTRAINT `fk_remind_user` FOREIGN KEY (`user_id`) REFERENCES `user` (`user_id`) ON DELETE CASCADE ON UPDATE CASCADE,
-  CONSTRAINT `fk_remind_memory` FOREIGN KEY (`memory_id`) REFERENCES `long_memory` (`memory_id`) ON DELETE SET NULL ON UPDATE CASCADE
+  CONSTRAINT `fk_remind_session` FOREIGN KEY (`session_id`) REFERENCES `chat_session` (`session_id`) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='主动关怀触发表';

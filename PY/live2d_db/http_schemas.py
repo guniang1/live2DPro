@@ -100,6 +100,16 @@ class LongMemoryPublic(BaseModel):
     last_consolidate_time: Optional[datetime] = None
 
 
+class LongMemoryConsolidateNowPublic(BaseModel):
+    """手动触发周期概要更新后的应答（不走后台最短间隔限制）。"""
+
+    ok: bool = True
+    updated: bool = Field(
+        ...,
+        description="是否成功写入或更新了 period_overview（无可用对话或摘要为空时为 false）",
+    )
+
+
 # ----- persona -----
 class PersonaCreate(BaseModel):
     character_desc: str
@@ -202,8 +212,14 @@ class RemindTriggerCreate(BaseModel):
     user_id: int
     trigger_type: str = Field(..., max_length=30)
     trigger_time: datetime
-    memory_id: Optional[int] = None
-    trigger_content: str
+    session_id: Optional[int] = Field(
+        None,
+        description="可选：绑定 chat_session.session_id；投递时用该轮对话作为语境（对话抽取会自动写入）",
+    )
+    trigger_content: str = Field(
+        ...,
+        description="创建时的情景详细描述；投递 WebSocket 时由服务端结合 session_id 召回语境后再生成最终话术",
+    )
     is_triggered: int = 0
 
 
@@ -211,8 +227,11 @@ class RemindTriggerUpdate(BaseModel):
     user_id: int
     trigger_type: str = Field(..., max_length=30)
     trigger_time: datetime
-    memory_id: Optional[int] = None
-    trigger_content: str
+    session_id: Optional[int] = None
+    trigger_content: str = Field(
+        ...,
+        description="情景详细描述（库内保存）；与 RemindTriggerCreate 一致",
+    )
     is_triggered: int
 
 
@@ -223,10 +242,23 @@ class RemindTriggerPublic(BaseModel):
     user_id: int
     trigger_type: str
     trigger_time: Optional[datetime] = None
-    memory_id: Optional[int] = None
-    trigger_content: str
+    session_id: Optional[int] = None
+    trigger_content: str = Field(
+        ...,
+        description="库内情景描述；实时推送中的台词见 WebSocket remind_trigger.trigger_content（为生成稿）",
+    )
     is_triggered: int
     create_time: Optional[datetime] = None
+
+
+class RemindSchedulerScanNowPublic(BaseModel):
+    """手动触发一轮 remind_trigger 扫描后的应答。"""
+
+    ok: bool = True
+    pending_fetched: int = 0
+    claimed: int = 0
+    delivered: int = 0
+    released_no_ws: int = 0
 
 
 # ----- system_config -----
@@ -346,6 +378,21 @@ class Live2dModelZipUploadPublic(BaseModel):
 class DownloadUrlPublic(BaseModel):
     url: str
     expires_in: int
+
+
+class BackgroundImagePublic(BaseModel):
+    """背景图元数据；``url`` 在 ``presign=true`` 时为临时访问链接。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    url: str
+    presigned_expires_in: int = Field(
+        0,
+        ge=0,
+        description="预签名有效期（秒）；0 表示未使用预签名（直链或推导 object_key 失败）",
+    )
 
 
 class Live2dModelPackageInfo(BaseModel):

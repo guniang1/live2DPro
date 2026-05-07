@@ -10,11 +10,13 @@ Live2D 数字人业务库 HTTP 接口（无鉴权，生产环境请加认证与�
 - remind_trigger：主动关怀/待办
 - system_config：可调参数（避免硬编码）
 - live2d_model_asset：Demo 下 Resources/<包名> 内模型/动作/表情等文件索引
+- background_image：背景图索引（MinIO URL）；GET /background-images/random 每次随机一行
 - persona：人设（全局模板；user_id+package_key 非空时为某用户某模型包专属，character_desc 写入聊天 system）；支持 ``expand_with_llm`` / ``POST /personas/expand-from-hints`` 由 Ollama 据简短关键词扩写角色与语气
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -32,6 +34,7 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from utils.audio_refer import ffmpeg_convert_bytes_to_wav, is_standard_riff_wav
+from utils.live2d_catalog import invalidate_live2d_catalog_cache
 from utils.persona_expand import PersonaExpandError, expand_persona_from_hints
 
 from .connection import connection_ctx
@@ -39,6 +42,7 @@ from .deps import get_db
 from .package_key_util import normalize_package_key as _normalize_package_key
 from .package_key_util import _PACKAGE_KEY_INVALID_SEQ as _PACKAGE_KEY_PATTERN
 from .entities import (
+    BackgroundImage,
     ChatSession,
     Live2dModelAsset,
     Live2dTtsRefer,
@@ -51,6 +55,7 @@ from .entities import (
 )
 from .http_schemas import (
     ChatSessionCreate,
+    BackgroundImagePublic,
     ChatSessionPublic,
     ChatSessionUpdate,
     Live2dModelAssetCreate,
@@ -60,6 +65,7 @@ from .http_schemas import (
     Live2dModelZipUploadPublic,
     Live2dTtsReferPublic,
     Live2dTtsReferUploadPublic,
+    LongMemoryConsolidateNowPublic,
     LongMemoryCreate,
     LongMemoryPublic,
     LongMemoryUpdate,
@@ -74,6 +80,7 @@ from .http_schemas import (
     PersonaUpdate,
     RemindTriggerCreate,
     RemindTriggerPublic,
+    RemindSchedulerScanNowPublic,
     RemindTriggerUpdate,
     SystemConfigCreate,
     SystemConfigPatchValue,
@@ -90,8 +97,9 @@ from .long_memory_fields import (
     merge_long_memory_record_for_prompt,
 )
 from .minio_redis_cache import presigned_get_url_cached
-from .minio_storage import get_bucket_name, upload_bytes
+from .minio_storage import get_bucket_name, get_public_base, upload_bytes
 from .repositories import (
+    BackgroundImageRepository,
     ChatSessionRepository,
     Live2dModelAssetRepository,
     Live2dTtsReferRepository,
@@ -461,7 +469,7 @@ def _remind_pub(t: RemindTrigger) -> RemindTriggerPublic:
         user_id=t.user_id,
         trigger_type=t.trigger_type,
         trigger_time=t.trigger_time,
-        memory_id=t.memory_id,
+        session_id=t.session_id,
         trigger_content=t.trigger_content,
         is_triggered=t.is_triggered,
         create_time=t.create_time,
@@ -517,6 +525,38 @@ def _tts_refer_pub(r: Live2dTtsRefer) -> Live2dTtsReferPublic:
         create_time=r.create_time,
         update_time=r.update_time,
     )
+
+
+def _object_key_from_background_public_url(url: str) -> Optional[str]:
+    """从种子脚本写入的 path-style 公开 URL 还原 MinIO object key。"""
+    u = (url or "").strip()
+    if not u:
+        return None
+    base = get_public_base().rstrip("/")
+    bucket = get_bucket_name()
+    prefix = f"{base}/{bucket}/"
+    if u.startswith(prefix):
+        return u[len(prefix) :].lstrip("/")
+    return None
+
+
+def _background_url_for_client(stored_url: str, *, presign: bool, expires_in: int) -> Tuple[str, int]:
+    if not presign:
+        return stored_url, 0
+    key = _object_key_from_background_public_url(stored_url)
+    if not key:
+        return stored_url, 0
+    try:
+        return presigned_get_url_cached(key, expires_in=expires_in), expires_in
+    except Exception as exc:
+        logger.warning("background presign failed: %s", exc)
+        return stored_url, 0
+
+
+def _background_image_public(row: BackgroundImage, *, presign: bool, expires_in: int) -> BackgroundImagePublic:
+    assert row.id is not None
+    url, ttl = _background_url_for_client(row.url, presign=presign, expires_in=expires_in)
+    return BackgroundImagePublic(id=int(row.id), name=row.name, url=url, presigned_expires_in=ttl)
 
 
 # ----- users -----
@@ -657,16 +697,19 @@ def chat_sessions_list(
     user_id: int = Query(..., description="按用户筛选"),
     package_key: Optional[str] = Query(None, max_length=64, description="模型包键（区分 A/B 模型）"),
     session_key: Optional[str] = Query(None, max_length=64, description="若传则只查该会话窗口内消息"),
-    limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    page: int = Query(1, ge=1, le=100_000, description="页码，从 1 起"),
+    size: int = Query(50, ge=1, le=500, description="每页条数"),
 ) -> List[ChatSessionPublic]:
+    lim = max(1, min(int(size), 500))
+    off = max(0, (int(page) - 1) * lim)
+    off = min(off, 100_000)
     if session_key:
         rows = ChatSessionRepository.list_by_session_key(
-            db, user_id, session_key, package_key=package_key, limit=limit, offset=offset
+            db, user_id, session_key, package_key=package_key, limit=lim, offset=off
         )
     else:
         rows = ChatSessionRepository.list_by_user(
-            db, user_id, package_key=package_key, limit=limit, offset=offset
+            db, user_id, package_key=package_key, limit=lim, offset=off
         )
     return [_chat_pub(s) for s in rows]
 
@@ -760,6 +803,29 @@ def long_memories_count(
 ) -> CountResponse:
     total = LongMemoryRepository.count_by_user(db, user_id, memory_type=memory_type)
     return CountResponse(total=total)
+
+
+@router.post("/long-memories/consolidate-now", response_model=LongMemoryConsolidateNowPublic)
+async def long_memories_consolidate_now(
+    user_id: int = Query(..., ge=1),
+    package_key: Optional[str] = Query(
+        None,
+        max_length=64,
+        description="当前模型包键，与聊天一致；省略则按 default",
+    ),
+) -> LongMemoryConsolidateNowPublic:
+    """立即执行一轮周期概要更新（写入 long_memory.period_overview），不受后台定时任务 24h 最短间隔限制。"""
+    from live2d_db.long_memory_consolidator import consolidate_one
+
+    pkg_norm = _normalize_package_key((package_key or "").strip() or "default", fallback="default")
+    redis_cli = _get_redis_client()
+
+    def _run() -> bool:
+        with connection_ctx() as conn:
+            return consolidate_one(conn, redis_cli, user_id, pkg_norm)
+
+    updated = await asyncio.to_thread(_run)
+    return LongMemoryConsolidateNowPublic(ok=True, updated=updated)
 
 
 @router.get("/long-memories/{memory_id}", response_model=LongMemoryPublic)
@@ -1002,7 +1068,7 @@ def remind_triggers_create(body: RemindTriggerCreate, db: Db) -> RemindTriggerPu
         user_id=body.user_id,
         trigger_type=body.trigger_type,
         trigger_time=body.trigger_time,
-        memory_id=body.memory_id,
+        session_id=body.session_id,
         trigger_content=body.trigger_content,
         is_triggered=body.is_triggered,
     )
@@ -1063,6 +1129,15 @@ def remind_triggers_pending_count(
     return CountResponse(total=total)
 
 
+@router.post("/remind-triggers/scan-now", response_model=RemindSchedulerScanNowPublic)
+async def remind_triggers_scan_now() -> RemindSchedulerScanNowPublic:
+    """立即执行一轮定时关怀扫描（不等后台间隔）。无鉴权，生产环境请自行加认证。"""
+    from live2d_db.remind_trigger_scheduler import run_scan_tick
+
+    stats = await run_scan_tick()
+    return RemindSchedulerScanNowPublic(ok=True, **stats)
+
+
 @router.get("/remind-triggers/{trigger_id}", response_model=RemindTriggerPublic)
 def remind_triggers_get(trigger_id: int, db: Db) -> RemindTriggerPublic:
     t = RemindTriggerRepository.get_by_id(db, trigger_id)
@@ -1079,7 +1154,7 @@ def remind_triggers_update(trigger_id: int, body: RemindTriggerUpdate, db: Db) -
     t.user_id = body.user_id
     t.trigger_type = body.trigger_type
     t.trigger_time = body.trigger_time
-    t.memory_id = body.memory_id
+    t.session_id = body.session_id
     t.trigger_content = body.trigger_content
     t.is_triggered = body.is_triggered
     RemindTriggerRepository.update(db, t)
@@ -1191,6 +1266,7 @@ def live2d_model_assets_create(body: Live2dModelAssetCreate, db: Db) -> Live2dMo
     aid = Live2dModelAssetRepository.create(db, a)
     got = Live2dModelAssetRepository.get_by_id(db, aid)
     assert got
+    invalidate_live2d_catalog_cache(body.user_id, body.package_key)
     return _model_asset_pub(got)
 
 
@@ -1276,6 +1352,7 @@ def live2d_model_assets_delete_package(
     rc = _get_redis_client()
     if rc:
         _memory_layers.delete_mimo_director_persona_cached(rc, user_id, pkg_norm)
+    invalidate_live2d_catalog_cache(user_id, package_key)
     return OkRows(affected_rows=n)
 
 
@@ -1391,6 +1468,46 @@ async def live2d_tts_refers_upload(
     )
 
 
+# ----- background_image（须在 /background-images/{id} 等动态段之前注册具体路径）-----
+@router.get("/background-images/count", response_model=CountResponse)
+def background_images_count(db: Db) -> CountResponse:
+    return CountResponse(total=BackgroundImageRepository.count_all(db))
+
+
+@router.get("/background-images/random", response_model=BackgroundImagePublic)
+def background_images_random(
+    db: Db,
+    presign: bool = Query(True, description="是否生成 MinIO 预签名 URL（私有桶建议开启）"),
+    expires_in: Optional[int] = Query(
+        None,
+        ge=60,
+        le=604800,
+        description="预签名秒数；省略则使用环境变量 MINIO_PRESIGN_EXPIRES（默认 3600）",
+    ),
+) -> BackgroundImagePublic:
+    row = BackgroundImageRepository.get_random_one(db)
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="暂无背景图，请先执行迁移并运行 PY/seed_demo_background_images_once.py",
+        )
+    ttl = expires_in if expires_in is not None else int(os.environ.get("MINIO_PRESIGN_EXPIRES", "3600"))
+    return _background_image_public(row, presign=presign, expires_in=ttl)
+
+
+@router.get("/background-images", response_model=List[BackgroundImagePublic])
+def background_images_list(
+    db: Db,
+    limit: int = Query(500, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+    presign: bool = Query(False, description="为每条生成预签名（数据多时会慢）"),
+    expires_in: Optional[int] = Query(None, ge=60, le=604800),
+) -> List[BackgroundImagePublic]:
+    rows = BackgroundImageRepository.list_all(db, limit=limit, offset=offset)
+    ttl = expires_in if expires_in is not None else int(os.environ.get("MINIO_PRESIGN_EXPIRES", "3600"))
+    return [_background_image_public(r, presign=presign, expires_in=ttl) for r in rows]
+
+
 # 必须在 /live2d-model-assets/{asset_id} 之前注册，否则路径段 download-url 会被当成 asset_id 导致 422。
 @router.get("/live2d-model-assets/download-url", response_model=DownloadUrlPublic)
 def live2d_model_assets_download_url(
@@ -1430,6 +1547,8 @@ def live2d_model_assets_update(asset_id: int, body: Live2dModelAssetUpdate, db: 
     a = Live2dModelAssetRepository.get_by_id(db, asset_id)
     if not a:
         raise HTTPException(status_code=404, detail="资源不存在")
+    prev_uid = a.user_id
+    prev_pkg = a.package_key
     a.user_id = body.user_id
     a.package_key = body.package_key
     a.relative_path = body.relative_path
@@ -1448,14 +1567,19 @@ def live2d_model_assets_update(asset_id: int, body: Live2dModelAssetUpdate, db: 
     Live2dModelAssetRepository.update(db, a)
     got = Live2dModelAssetRepository.get_by_id(db, asset_id)
     assert got
+    invalidate_live2d_catalog_cache(prev_uid, prev_pkg)
+    if prev_uid != body.user_id or prev_pkg != body.package_key:
+        invalidate_live2d_catalog_cache(body.user_id, body.package_key)
     return _model_asset_pub(got)
 
 
 @router.delete("/live2d-model-assets/{asset_id}", response_model=OkRows)
 def live2d_model_assets_delete(asset_id: int, db: Db) -> OkRows:
-    n = Live2dModelAssetRepository.delete_by_id(db, asset_id)
-    if not n:
+    a = Live2dModelAssetRepository.get_by_id(db, asset_id)
+    if not a:
         raise HTTPException(status_code=404, detail="资源不存在")
+    n = Live2dModelAssetRepository.delete_by_id(db, asset_id)
+    invalidate_live2d_catalog_cache(a.user_id, a.package_key or "")
     return OkRows(affected_rows=n)
 
 
@@ -1578,6 +1702,7 @@ async def live2d_model_assets_upload_zip(
     for asset in assets:
         Live2dModelAssetRepository.insert(db, asset)
         inserted_rows += 1
+    invalidate_live2d_catalog_cache(user_id, pkg)
     return Live2dModelZipUploadPublic(
         user_id=user_id,
         package_key=pkg,

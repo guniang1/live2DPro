@@ -26,7 +26,7 @@ from utils.tts import (
 from live2d_db.connection import connection_ctx
 from live2d_db.package_key_util import normalize_package_key as _normalize_package_key_for_cache
 from live2d_db.db_config import DbConfig
-from live2d_db.entities import ChatSession
+from live2d_db.entities import ChatSession, RemindTrigger
 from live2d_db.long_memory_fields import (
     long_memory_has_any_content,
     merge_long_memory_record_for_prompt,
@@ -39,6 +39,14 @@ from live2d_db.repositories import (
     LongMemoryRepository,
     PersonaRepository,
     Live2dTtsReferRepository,
+    RemindTriggerRepository,
+    UserProfileRepository,
+)
+from utils.user_profile_refresh import (
+    chat_inject_enabled,
+    format_profile_for_chat_system,
+    maybe_refresh_user_profile_after_turn,
+    refresh_user_profile_on_disconnect,
 )
 from utils.live2d_catalog import (
     get_catalog_for_package,
@@ -101,6 +109,168 @@ logger.info(
 _session_lock = asyncio.Lock()
 _session_tts_ws: dict[str, WebSocket] = {}
 _session_chat_ws: dict[str, WebSocket] = {}
+# user_id -> 当前活跃的 /ws/chat 连接（同一用户多标签页各一条）
+_chat_ws_by_user: dict[int, list[WebSocket]] = {}
+
+
+def _register_chat_ws_for_user(user_id: int, websocket: WebSocket) -> None:
+    lst = _chat_ws_by_user.setdefault(user_id, [])
+    if websocket not in lst:
+        lst.append(websocket)
+
+
+def _unregister_chat_ws_for_user(user_id: int, websocket: WebSocket) -> None:
+    lst = _chat_ws_by_user.get(user_id)
+    if not lst:
+        return
+    try:
+        lst.remove(websocket)
+    except ValueError:
+        pass
+    if not lst:
+        _chat_ws_by_user.pop(user_id, None)
+
+
+def _remind_trigger_ws_payload(t: RemindTrigger, *, display_content: str) -> dict:
+    """``display_content`` 为触发时点生成的对用户话术；库表 ``trigger_content`` 仍为情景描述。"""
+    tt = t.trigger_time
+    ts = None
+    if isinstance(tt, datetime):
+        ts = tt.isoformat(sep=" ", timespec="seconds")
+    return {
+        "type": "remind_trigger",
+        "trigger_id": t.trigger_id,
+        "trigger_type": t.trigger_type,
+        "trigger_content": (display_content or "").strip(),
+        "trigger_time": ts,
+    }
+
+
+def _remind_trigger_use_mimo_tts() -> bool:
+    raw = os.getenv("REMIND_TRIGGER_USE_MIMO", "1")
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+
+async def _deliver_remind_trigger_on_websocket(
+    websocket: WebSocket,
+    user_id: int,
+    t: RemindTrigger,
+) -> bool:
+    """先按语境生成话术并下发 ``remind_trigger`` JSON；若 MiMo 可用则再下发 ``chunk_audio``（``remind_audio``）+ WAV。
+
+    话术由 ``session_id`` 关联的单轮对话 + 库中情景描述（``trigger_content``）经 LLM 生成；MiMo 朗读该生成稿。
+    """
+    pkg = _live2d_package_from_websocket(websocket)
+    from utils.remind_delivery import generate_remind_delivery_message
+
+    display_line = await asyncio.to_thread(generate_remind_delivery_message, t, pkg)
+    if not await _try_send_json(
+        websocket, _remind_trigger_ws_payload(t, display_content=display_line)
+    ):
+        return False
+
+    if not _remind_trigger_use_mimo_tts():
+        return True
+    if normalized_tts_provider() != "mimo" or not mimo_tts_configured():
+        return True
+
+    text = (display_line or "").strip()
+    if not text:
+        return True
+
+    refer = await asyncio.to_thread(_load_tts_refer_runtime, user_id, pkg)
+    wav: bytes = b""
+    try:
+        _inc_dir = _mimo_ws_include_director_enabled()
+        mimo_director_user_prompt = ""
+        if _inc_dir:
+            mimo_director_user_prompt = await asyncio.to_thread(
+                _mimo_director_user_prompt_sync,
+                user_id,
+                pkg,
+                "",
+            )
+        tts_lang = os.getenv("TTS_TEXT_LANGUAGE", "zh")
+        wav = await asyncio.to_thread(
+            mimo_tts,
+            text,
+            text_language=tts_lang,
+            refer_runtime=refer,
+            user_director_prompt=mimo_director_user_prompt or None,
+            speech_assistant_only=not _inc_dir,
+            merge_env_user_prompts=not _inc_dir,
+        )
+    except Exception:
+        logger.exception(
+            "定时关怀 MiMo 合成失败 trigger_id=%s user_id=%s package=%s",
+            t.trigger_id,
+            user_id,
+            pkg,
+        )
+        return True
+    finally:
+        _cleanup_tts_refer_runtime(refer)
+
+    if not wav:
+        return True
+
+    chunk_meta = {
+        "type": "chunk_audio",
+        "index": 1,
+        "size": len(wav),
+        "content": "",
+        "remind_audio": True,
+    }
+    if not await _try_send_json(websocket, chunk_meta):
+        return True
+    await _try_send_bytes(websocket, wav)
+    return True
+
+
+async def broadcast_remind_trigger_to_user(user_id: int, t: RemindTrigger) -> bool:
+    """向该用户所有在线聊天连接广播定时场景推送（含可选 MiMo 朗读）；无在线连接则返回 False。"""
+    async with _session_lock:
+        conns = list(_chat_ws_by_user.get(user_id, []))
+    any_ok = False
+    for ws in conns:
+        if ws.client_state != WebSocketState.CONNECTED:
+            continue
+        ok = await _deliver_remind_trigger_on_websocket(ws, user_id, t)
+        any_ok = any_ok or ok
+    return any_ok
+
+
+async def flush_pending_reminders_for_connection(websocket: WebSocket, user_id: int) -> None:
+    """连接建立后补发该用户已到期且尚未成功投递的提醒（与后台扫描共用认领语义）。"""
+    before = datetime.now()
+
+    def _list_u():
+        with connection_ctx(DbConfig.from_env()) as conn:
+            return RemindTriggerRepository.list_pending_for_user_before(conn, user_id, before, limit=100)
+
+    rows = await asyncio.to_thread(_list_u)
+    for t in rows:
+        tid = t.trigger_id
+        if tid is None:
+            continue
+        if websocket.client_state != WebSocketState.CONNECTED:
+            break
+
+        def _claim():
+            with connection_ctx(DbConfig.from_env()) as conn:
+                return RemindTriggerRepository.claim_pending_trigger(conn, tid)
+
+        claimed = await asyncio.to_thread(_claim)
+        if not claimed:
+            continue
+        ok = await _deliver_remind_trigger_on_websocket(websocket, user_id, t)
+        if not ok:
+
+            def _release():
+                with connection_ctx(DbConfig.from_env()) as conn:
+                    RemindTriggerRepository.release_trigger_claim(conn, tid)
+
+            await asyncio.to_thread(_release)
 
 
 def _session_id_from_websocket(websocket: WebSocket) -> str:
@@ -249,12 +419,12 @@ def _persist_raw_memory(
     user_input: str,
     ai_reply: str,
     emotion_tag: str | None = None,
-) -> None:
-    """把本轮原始对话写入 chat_session。"""
+) -> int | None:
+    """把本轮原始对话写入 chat_session；返回新行的 ``session_id``，未写入则 ``None``。"""
     user_input = (user_input or "").strip()
     ai_reply = (ai_reply or "").strip()
     if not user_input and not ai_reply:
-        return
+        return None
     chat_row = ChatSession(
         user_id=user_id,
         package_key=(package_key or "").strip()[:64] or "default",
@@ -264,7 +434,7 @@ def _persist_raw_memory(
         session_key=(session_key or "").strip()[:64] or "default",
     )
     with connection_ctx(DbConfig.from_env()) as conn:
-        ChatSessionRepository.insert(conn, chat_row)
+        return ChatSessionRepository.insert(conn, chat_row)
 
 
 def _tts_speed_default() -> float:
@@ -485,15 +655,61 @@ def _package_persona_chat_extra_sync(user_id: int, package_key: str) -> str:
         return ""
 
 
-def _chat_system_prompt_for_session(user_id: int, package_key: str) -> str:
-    """全局聊天设定 + 可选的「当前模型」人设（语气风格 + 角色设定）。"""
+def _user_profile_prompt_extra_sync(user_id: int) -> str:
+    """MySQL ``user_profile`` 摘要块，供主对话 system 使用。"""
+    if user_id < 1 or not chat_inject_enabled():
+        return ""
+    try:
+        with connection_ctx(DbConfig.from_env()) as conn:
+            p = UserProfileRepository.get_by_user_id(conn, user_id)
+        return format_profile_for_chat_system(p)
+    except Exception:
+        logger.exception("读取用户画像用于 system 失败 user_id=%s", user_id)
+        return ""
+
+
+def _scene_context_system_block(*, scene_location: str, scene_time: str) -> str:
+    """随机背景名（角色所处叙事世界）+ 用户设备真实时间（现实侧），写入主对话 system（空则返回空串）。"""
+    loc = (scene_location or "").strip()
+    tim = (scene_time or "").strip()
+    if not loc and not tim:
+        return ""
+    parts: list[str] = []
+    if loc:
+        parts.append(f"角色所在场景（画面背景名，叙事中的世界）：{loc}")
+    if tim:
+        parts.append(f"用户侧真实时间（发言时刻，现实时间）：{tim}")
+    summary = "；".join(parts)
+    return (
+        "【叙事与现实语境】\n"
+        f"{summary}\n"
+        "说明：前者对应角色所处虚拟场景；后者为对谈发生时用户设备的本地时刻。"
+        "回复时请自然融入情境与时间感，不要生硬复述以上标签句。"
+    )
+
+
+def _chat_system_prompt_for_session(
+    user_id: int,
+    package_key: str,
+    *,
+    scene_location: str = "",
+    scene_time: str = "",
+) -> str:
+    """全局聊天设定 + 可选的「当前模型」人设（语气风格 + 角色设定）+ 用户画像 + 场景/时间。"""
     base = _chat_system_prompt()
     if user_id < 1:
         return base
+    chunks: list[str] = [base]
+    scene_blk = _scene_context_system_block(scene_location=scene_location, scene_time=scene_time)
+    if scene_blk:
+        chunks.append(scene_blk)
     extra = _package_persona_chat_extra_sync(user_id, package_key)
-    if not extra:
-        return base
-    return f"{base}\n\n【当前模型人设】\n{extra}"
+    if extra:
+        chunks.append("【当前模型人设】\n" + extra)
+    prof = _user_profile_prompt_extra_sync(user_id)
+    if prof:
+        chunks.append(prof)
+    return "\n\n".join(chunks)
 
 
 def _mimo_director_role_guide_text(persona_role: str, persona_tone: str) -> str:
@@ -516,8 +732,11 @@ def _mimo_director_user_prompt_sync(
     user_id: int,
     package_key: str,
     _current_user_message: str,
+    *,
+    scene_location: str = "",
+    scene_time: str = "",
 ) -> str:
-    """MiMo：user 侧「导演」——仅【人设】【语气】（character_desc + tone_style）；不含【场景】与其它固定说明。
+    """MiMo：user 侧「导演」——【人设】【语气】+ 可选【场景】（与主对话一致）。
 
     ``_current_user_message`` 保留为调用签名兼容，当前不参与拼接。"""
     persona_role = ""
@@ -551,6 +770,15 @@ def _mimo_director_user_prompt_sync(
             )
 
     out = _mimo_director_role_guide_text(persona_role, persona_tone)
+    loc = (scene_location or "").strip()
+    tim = (scene_time or "").strip()
+    if loc or tim:
+        bits: list[str] = []
+        if loc:
+            bits.append(f"角色场景（背景）：{loc}")
+        if tim:
+            bits.append(f"用户真实时间：{tim}")
+        out = "【叙事与现实】" + "；".join(bits) + "\n\n" + out
     try:
         max_total = int(os.getenv("MIMO_TTS_DIRECTOR_MAX_CHARS", "4500"))
     except ValueError:
@@ -566,7 +794,7 @@ def _coerce_redis_history_messages(
 ) -> list[dict]:
     """兼容新格式(role/content)与旧格式(user_input/ai_reply)缓存。"""
     sys_content = (
-        _chat_system_prompt_for_session(user_id, package_key)
+        _chat_system_prompt_for_session(user_id, package_key, scene_location="", scene_time="")
         if user_id >= 1
         else _chat_system_prompt()
     )
@@ -704,10 +932,21 @@ def _log_wschat_memory_snapshot(
         )
 
 
-def _build_memory_for_model(user_id: int, package_key: str) -> tuple[list[dict], str]:
+def _build_memory_for_model(
+    user_id: int,
+    package_key: str,
+    *,
+    scene_location: str = "",
+    scene_time: str = "",
+) -> tuple[list[dict], str]:
     """双层记忆 + 长期：system 含长期（若有）、短期缩减块；messages 仅含最近 N 轮瞬时对话。返回 (messages, short_term_plain)。"""
     sys_base = (
-        _chat_system_prompt_for_session(user_id, package_key)
+        _chat_system_prompt_for_session(
+            user_id,
+            package_key,
+            scene_location=scene_location,
+            scene_time=scene_time,
+        )
         if user_id >= 1
         else _chat_system_prompt()
     )
@@ -823,6 +1062,17 @@ def _append_turn_to_redis_history(
 ) -> None:
     """兼容旧函数名：每轮结束后更新瞬时 + 短期记忆。"""
     _append_turn_memory_layers(user_id, package_key, user_input, ai_reply)
+    if user_id >= 1:
+        cli = _get_redis_client()
+        if cli is not None:
+            try:
+                maybe_refresh_user_profile_after_turn(cli, user_id, package_key)
+            except Exception:
+                logger.exception(
+                    "用户画像周期刷新调度异常 user_id=%s package=%s",
+                    user_id,
+                    package_key,
+                )
 
 
 def ollama_chat_stream_options() -> dict:
@@ -850,10 +1100,17 @@ def ollama_chat_messages(
     *,
     user_id: int = 0,
     package_key: str = "",
+    scene_location: str = "",
+    scene_time: str = "",
 ) -> list[dict]:
     """聊天消息：system 固定首条，历史按 user/assistant 交替，末尾追加本轮 user。"""
     sys_content = (
-        _chat_system_prompt_for_session(user_id, package_key)
+        _chat_system_prompt_for_session(
+            user_id,
+            package_key,
+            scene_location=scene_location,
+            scene_time=scene_time,
+        )
         if user_id >= 1
         else _chat_system_prompt()
     )
@@ -1005,13 +1262,80 @@ def parse_action_json(text: str, cat) -> tuple[str, str, str | None]:
     return ex_sw, mo_sw, reason
 
 
-def _infer_expression_motion(user_message: str, cat) -> tuple[str, str]:
-    """动作 LLM（非流式）：返回 (expression, motion)。"""
+def _format_instant_turns_for_action_llm(
+    turns: list[dict[str, str]],
+    *,
+    per_line_max: int = 420,
+    total_max: int = 2600,
+) -> str:
+    """将瞬时记忆轮次格式化为动作模型的可读上下文（时间正序）。"""
+    if not turns:
+        return ""
+    lines: list[str] = []
+    for i, t in enumerate(turns, start=1):
+        u = _truncate_mysql_text((t.get("u") or "").strip(), per_line_max)
+        a = _truncate_mysql_text((t.get("a") or "").strip(), per_line_max)
+        if u:
+            lines.append(f"第{i}轮 用户：{u}")
+        if a:
+            lines.append(f"第{i}轮 助手：{a}")
+    blob = "\n".join(lines).strip()
+    if len(blob) > total_max:
+        blob = blob[-total_max:].lstrip()
+        blob = "…（更早对话已省略）\n" + blob
+    return blob
+
+
+def _action_llm_user_content_sync(user_id: int, package_key: str, user_message: str) -> str:
+    """为人设 + 瞬时记忆 + 本轮输入；未登录或与主对话一致地退化为仅本轮句子。"""
+    um = (user_message or "").strip()
+    if user_id < 1:
+        return um
+    pkg = (package_key or "").strip()
+    if not pkg:
+        return um
+    persona = _package_persona_chat_extra_sync(user_id, pkg)
+    instant_blob = ""
+    cli = _get_redis_client()
+    if cli is not None:
+        instant_blob = _format_instant_turns_for_action_llm(
+            _memory_layers.read_instant_turns_chronological(cli, user_id, pkg)
+        )
+    blocks: list[str] = []
+    if persona.strip():
+        blocks.append("【人设参考】\n" + persona.strip())
+    if instant_blob:
+        blocks.append("【最近对话（瞬时记忆）】\n" + instant_blob)
+    blocks.append("【本轮用户输入】\n" + um)
+    body = "\n\n".join(blocks)
+    # 与仅单句输入区分：多段上下文下强调选型对象是 Live2D 角色，不是用户
+    if persona.strip() or instant_blob:
+        return (
+            "【选题对象】以下为会话上下文；你要输出的是 **Live2D 虚拟角色（助手）** 应切换到的表情与动作资源，"
+            "用于表现该**角色**对谈话的反应；不要当成用户本人的表情或动作。\n\n"
+            + body
+        )
+    return body
+
+
+def _infer_expression_motion(
+    user_message: str,
+    cat,
+    *,
+    user_id: int = 0,
+    package_key: str = "",
+) -> tuple[str, str]:
+    """动作 LLM（非流式）：返回 (expression, motion)。
+
+    已登录且带上 package_key 时，user 侧会注入 MySQL 人设与 Redis 瞬时对话，与主对话模型一致。
+    """
+    action_user_content = _action_llm_user_content_sync(user_id, package_key, user_message)
     action_system_text = (
         cat.action_llm_system_text
-        + "你需要根据用户聊天内容，匹配人物性格，选择最合适的表情和动作。"
-        +"表情只能从给定表情列表里选，动作只能从给定动作列表里选。"
-        +"输出严格JSON，只返回 expression、motion、reason。"
+        + "你要为 **Live2D 虚拟角色（助手）** 选型：依据人设、瞬时记忆中的情境与用户本轮输入，"
+        "结合该**角色**的性格与会话氛围，选出角色此刻应表现的表情与动作；勿替真人用户选型。"
+        + "表情只能从给定表情列表里选，动作只能从给定动作列表里选。"
+        + "输出严格JSON，只返回 expression、motion、reason。"
     )
     action_opts: dict = {
         "num_predict": 512,
@@ -1023,7 +1347,7 @@ def _infer_expression_motion(user_message: str, cat) -> tuple[str, str]:
             model=OLLAMA_ACTION_MODEL,
             messages=[
                 {"role": "system", "content": action_system_text},
-                {"role": "user", "content": user_message},
+                {"role": "user", "content": action_user_content},
             ],
             options=action_opts,
         )
@@ -1034,7 +1358,7 @@ def _infer_expression_motion(user_message: str, cat) -> tuple[str, str]:
                 model=OLLAMA_ACTION_MODEL,
                 messages=[
                     {"role": "system", "content": action_system_text},
-                    {"role": "user", "content": user_message},
+                    {"role": "user", "content": action_user_content},
                 ],
                 options={"num_predict": 512, "temperature": 0.1},
             )
@@ -1124,6 +1448,9 @@ WebSocket 聊天接口
     - 流式内容（``TTS_PROVIDER=mimo`` 且已配置 ``MIMO_API_KEY``，或已配置 GPT-SoVITS 参考音频时）：默认按 **标点攒批**（``TTS_FLUSH_EVERY_N_SENTENCE_END``，默认每 4 个标点一次合成）下发 ``{"type":"chunk_audio",...}``（首条可带 ``expression``/``motion``），**紧接**一条二进制 WAV；合成完成后才推送该段文本与音频。**流水线**：攒满一段即入队，**不等待**该段合成结束即可继续收 token 攒下一段；并行合成路数由 ``TTS_STREAM_PIPELINE_SLOTS``（优先）或 ``TTS_PARALLEL_WORKERS`` / ``TTS_PARALLEL_WORKERS_MIMO`` 决定，前端仍 **按 segment index 递增** 收音频。MiMo 音色克隆可按批重复上传参考音频；若希望整轮只请求一次云端合成，设 ``MIMO_TTS_WS_SINGLE_SHOT=1``（全文结束后单次 ``chunk_audio``）。MiMo 默认附带 **导演指令**（仅 MySQL 人设：``character_desc`` / ``tone_style``，对应【人设】【语气】）；``MIMO_TTS_WS_INCLUDE_DIRECTOR=0`` 可关。
     - 完成标记：{"type": "done"}
     - 错误信息：{"type": "error", "message": "错误描述"}
+    - 定时场景（生日、纪念日、考试等）：{"type": "remind_trigger", "trigger_content": …} 中的 ``trigger_content``
+      为**触发时点生成**的台词（服务端按 ``session_id``→``chat_session`` 单轮原文与情景描述生成）；库表同名列存情景描述。随后若 MiMo 已配置且未关闭 ``REMIND_TRIGGER_USE_MIMO``，
+      可再跟 ``chunk_audio``（``remind_audio``）+ WAV（朗读该生成稿）。
 
     可选遗留：``/ws/tts`` 仍可容纳连接，但默认前端已不再使用；朗读数据走 ``/ws/chat``。
     客户端切换 Resources 下模型目录时，应对 ``/ws/chat`` 重连并带上 ``?package=<目录名>``，使首条 catalog 与动作 LLM 扫描该包。
@@ -1164,6 +1491,7 @@ async def chat_websocket(websocket: WebSocket):
     chat_user_id = _user_id_from_websocket(websocket)
     async with _session_lock:
         _session_chat_ws[chat_session] = websocket
+        _register_chat_ws_for_user(chat_user_id, websocket)
     live_pkg = _live2d_package_from_websocket(websocket)
     session_catalog = get_catalog_for_package(live_pkg, user_id=chat_user_id)
     tts_refer_runtime = None
@@ -1195,6 +1523,7 @@ async def chat_websocket(websocket: WebSocket):
         _tts_hint,
     )
     await _send_catalog(websocket, session_catalog)
+    await flush_pending_reminders_for_connection(websocket, chat_user_id)
 
     async def _chat_stream_invalid() -> bool:
         if websocket.client_state != WebSocketState.CONNECTED:
@@ -1221,6 +1550,10 @@ async def chat_websocket(websocket: WebSocket):
                     break
                 raise
             user_message = data.get("message", "").strip()
+            scene_location = str(
+                data.get("scene_location") or data.get("scene_label") or ""
+            ).strip()
+            scene_time = str(data.get("scene_time") or "").strip()
 
             # 空消息过滤
             if not user_message:
@@ -1250,6 +1583,8 @@ async def chat_websocket(websocket: WebSocket):
                     _build_memory_for_model,
                     chat_user_id,
                     session_catalog.package_key,
+                    scene_location=scene_location,
+                    scene_time=scene_time,
                 )
                 # MiMo 合并流默认附带导演：【人设】【语气】仅人设字段（Redis/MySQL），不含【场景】与通用说明。
                 # 显式 ``MIMO_TTS_WS_INCLUDE_DIRECTOR=0`` 可关闭。
@@ -1265,9 +1600,15 @@ async def chat_websocket(websocket: WebSocket):
                         chat_user_id,
                         session_catalog.package_key,
                         user_message,
+                        scene_location=scene_location,
+                        scene_time=scene_time,
                     )
                 expr, mot = await asyncio.to_thread(
-                    _infer_expression_motion, user_message, session_catalog
+                    _infer_expression_motion,
+                    user_message,
+                    session_catalog,
+                    user_id=chat_user_id,
+                    package_key=session_catalog.package_key,
                 )
                 _ttp = normalized_tts_provider()
                 if _ttp == "mimo":
@@ -1311,6 +1652,8 @@ async def chat_websocket(websocket: WebSocket):
                                 history_messages=history_messages,
                                 user_id=chat_user_id,
                                 package_key=session_catalog.package_key,
+                                scene_location=scene_location,
+                                scene_time=scene_time,
                             ),
                             "stream": True,
                         }
@@ -1733,8 +2076,9 @@ async def chat_websocket(websocket: WebSocket):
                         )
 
                 redis_write_task.add_done_callback(_on_redis_write_done)
+                turn_session_id: int | None = None
                 try:
-                    await asyncio.to_thread(
+                    turn_session_id = await asyncio.to_thread(
                         _persist_raw_memory,
                         chat_user_id,
                         chat_session,
@@ -1749,6 +2093,44 @@ async def chat_websocket(websocket: WebSocket):
                         chat_user_id,
                         chat_session,
                     )
+                else:
+                    _um = (user_message or "").strip()
+                    _arf = (ai_reply_full or "").strip()
+                    if _um and _arf:
+
+                        def _run_turn_remind_extract() -> None:
+                            try:
+                                from utils.remind_extract import extract_and_persist_reminders
+
+                                extract_and_persist_reminders(
+                                    chat_user_id,
+                                    _um,
+                                    _arf,
+                                    package_key=session_catalog.package_key,
+                                    session_id=turn_session_id,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "异步抽取定时关怀失败 user_id=%s session=%s",
+                                    chat_user_id,
+                                    chat_session,
+                                )
+
+                        _turn_extract_task = asyncio.create_task(
+                            asyncio.to_thread(_run_turn_remind_extract),
+                            name=f"remind_extract_u{chat_user_id}",
+                        )
+
+                        def _on_turn_extract_done(task: asyncio.Task) -> None:
+                            try:
+                                task.result()
+                            except Exception:
+                                logger.exception(
+                                    "异步抽取定时关怀任务收尾异常 user_id=%s",
+                                    chat_user_id,
+                                )
+
+                        _turn_extract_task.add_done_callback(_on_turn_extract_done)
 
                 if not await _chat_stream_invalid():
                     ok = await _try_send_json(websocket, {"type": "done"})
@@ -1789,7 +2171,25 @@ async def chat_websocket(websocket: WebSocket):
         async with _session_lock:
             if _session_chat_ws.get(chat_session) is websocket:
                 _session_chat_ws.pop(chat_session, None)
+            _unregister_chat_ws_for_user(chat_user_id, websocket)
         _cleanup_tts_refer_runtime(tts_refer_runtime)
+        if chat_user_id >= 1:
+            _cli_pf = _get_redis_client()
+            if _cli_pf is not None:
+                _pkg_pf = session_catalog.package_key
+                try:
+                    await asyncio.to_thread(
+                        refresh_user_profile_on_disconnect,
+                        _cli_pf,
+                        chat_user_id,
+                        _pkg_pf,
+                    )
+                except Exception:
+                    logger.exception(
+                        "关页断开触发的用户画像刷新异常 user_id=%s package=%s",
+                        chat_user_id,
+                        _pkg_pf,
+                    )
         try:
             if websocket.client_state == WebSocketState.CONNECTED:
                 await websocket.close()

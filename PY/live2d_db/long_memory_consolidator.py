@@ -1,4 +1,4 @@
-"""长期记忆固化。
+"""长期记忆的周期概要更新。
 
 流程（三步）：
 
@@ -39,10 +39,10 @@ logger = logging.getLogger(__name__)
 _stop_event: Optional[asyncio.Event] = None
 _background_task: Optional[asyncio.Task[None]] = None
 
-# 固化调度与会话窗口（写死，不新增环境变量）。模型与 Ollama 地址与聊天共用 OLLAMA_MODEL / OLLAMA_HOST。
+# 周期概要更新的调度与时间窗（写死，不新增环境变量）。模型与 Ollama 地址与聊天共用 OLLAMA_MODEL / OLLAMA_HOST。
 _INTERVAL_SEC = 86400
-_SOURCE_WINDOW_SEC = 604800  # 7 天内 chat_session
-_MIN_GAP_SEC = 86400  # 同一 user×包最短再次固化间隔
+_SOURCE_WINDOW_SEC = 86400  # 最近 24 小时内 chat_session
+_MIN_GAP_SEC = 86400  # 同一 user×包两次周期概要更新之间的最短间隔
 # 送入摘要模型的叙述材料上限；超长时用「首+尾」保留，避免只留尾部时丢掉早期称呼/话题
 _MAX_RAW_CHARS = 30000
 _NUM_PREDICT = 1536  # 纯文本摘要生成长度上限（材料长时需要多分句）
@@ -93,10 +93,10 @@ def _log_chat_sessions_fetched_for_consolidation(
     window_start: datetime,
     sql_limit: int,
 ) -> None:
-    """打印本次长期固化从 MySQL 扫到的 chat_session（便于核对是否扫全）。"""
+    """打印本次周期概要更新从 MySQL 扫到的 chat_session（便于核对是否扫全）。"""
     n = len(rows)
     logger.info(
-        "【长期固化】chat_session SQL 命中 user_id=%s pkg_norm=%s raw_package_keys=%s rows=%s "
+        "【周期概要更新】chat_session SQL 命中 user_id=%s pkg_norm=%s raw_package_keys=%s rows=%s "
         "window_start=%s sql_limit=%s（create_time>=window 且 package_key IN raw_keys）",
         user_id,
         package_key_norm,
@@ -486,7 +486,7 @@ def consolidate_one(
     user_id: int,
     package_key_norm: str,
 ) -> bool:
-    """对单用户、单逻辑包执行一次长期固化；成功返回 True。
+    """对单用户、单逻辑包执行一次周期概要更新；成功返回 True。
 
     读取 ``chat_session`` → 改写成叙述性一段 → LLM 输出纯文本摘要写入 ``period_overview``（必要时修补）。
     """
@@ -719,12 +719,12 @@ def consolidate_one(
             _mem.write_long_memory_text(redis_cli, user_id, package_key_norm, merged)
         except Exception:
             logger.exception("长期记忆写 Redis 失败 user_id=%s pkg=%s", user_id, package_key_norm)
-    logger.info("长期记忆固化完成 user_id=%s pkg=%s", user_id, package_key_norm)
+    logger.info("长期记忆周期概要更新完成 user_id=%s pkg=%s", user_id, package_key_norm)
     return True
 
 
 def run_manual_long_memory_backfill() -> int:
-    """对统计窗口内所有出现过会话的 user×逻辑包各跑一次固化；返回组合数量。"""
+    """对统计窗口内所有出现过会话的 user×逻辑包各执行一次周期概要更新；返回组合数量。"""
     redis_cli = get_redis_client(logger)
     with connection_ctx() as conn:
         pairs = ChatSessionRepository.distinct_user_normalized_packages_in_window(
@@ -735,7 +735,7 @@ def run_manual_long_memory_backfill() -> int:
             with connection_ctx() as conn2:
                 consolidate_one(conn2, redis_cli, uid, pkg_norm)
         except Exception:
-            logger.exception("长期记忆单组固化异常 user_id=%s pkg=%s", uid, pkg_norm)
+            logger.exception("长期记忆单组周期概要更新异常 user_id=%s pkg=%s", uid, pkg_norm)
     return len(pairs)
 
 
@@ -750,7 +750,7 @@ def _run_tick() -> None:
             with connection_ctx() as conn2:
                 consolidate_one(conn2, redis_cli, uid, pkg_norm)
         except Exception:
-            logger.exception("长期记忆单组固化异常 user_id=%s pkg=%s", uid, pkg_norm)
+            logger.exception("长期记忆单组周期概要更新异常 user_id=%s pkg=%s", uid, pkg_norm)
 
 
 async def _sleep_interval_or_until_stop() -> None:

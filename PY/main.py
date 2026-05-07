@@ -16,6 +16,10 @@ from live2d_db.long_memory_consolidator import (
     start_long_memory_consolidator,
     stop_long_memory_consolidator,
 )
+from live2d_db.remind_trigger_scheduler import (
+    start_remind_trigger_scheduler,
+    stop_remind_trigger_scheduler,
+)
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -26,9 +30,11 @@ async def lifespan(app: FastAPI):
     # 扫描 Resources 下表情/动作，供 LLM 系统提示与 chunk 附带字段
     init_catalog()
     await start_long_memory_consolidator()
+    await start_remind_trigger_scheduler()
     try:
         yield
     finally:
+        await stop_remind_trigger_scheduler()
         await stop_long_memory_consolidator()
 
 

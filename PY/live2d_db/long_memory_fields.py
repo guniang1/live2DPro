@@ -1,9 +1,9 @@
 """长期记忆语义维度与库表文本列。
 
 一行 ``long_memory`` 对应一个模型角色 (user_id + package_key)；Redis 缓存合并后的 prompt 片段。
-固化依据来自表 ``chat_session``。
+摘要依据来自表 ``chat_session``。
 
-**产品约定**：LLM 固化 **只维护** ``period_overview``（新摘要追加到原有内容之后）。
+**产品约定**：LLM 摘要环节 **只维护** ``period_overview``（新摘要追加到原有内容之后）。
 注入聊天 system 时仅 ``LONG_MEMORY_DIMENSIONS``（周期概要）。
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-# 合并进模型 system 的维度（仅周期概要；与 LLM 固化输出 JSON 键一致）
+# 合并进模型 system 的维度（仅周期概要；与 LLM 摘要输出 JSON 键一致）
 LONG_MEMORY_DIMENSIONS: tuple[tuple[str, str], ...] = (("period_overview", "周期概要"),)
 
 LONG_MEMORY_JSON_KEYS: tuple[str, ...] = tuple(k for k, _ in LONG_MEMORY_DIMENSIONS)

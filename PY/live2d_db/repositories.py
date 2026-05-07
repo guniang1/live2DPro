@@ -25,6 +25,7 @@ import pymysql
 from .long_memory_fields import LONG_MEMORY_DB_TEXT_COLUMNS
 from .package_key_util import normalize_package_key as _normalize_pkg_key
 from .entities import (
+    BackgroundImage,
     ChatSession,
     Live2dModelAsset,
     Live2dTtsRefer,
@@ -379,7 +380,7 @@ class ChatSessionRepository:
         window_start: datetime,
         limit: int = 5000,
     ) -> List[ChatSession]:
-        """长期固化专用：仅从表 ``chat_session`` 取轮次（不使用 Redis）。多 ``package_key``（同逻辑包不同写法）下，
+        """周期概要更新专用：仅从表 ``chat_session`` 取轮次（不使用 Redis）。多 ``package_key``（同逻辑包不同写法）下，
         取时间窗内对话，按 ``create_time`` 正序。"""
         keys = [str(k) for k in package_keys if str(k).strip()]
         if not keys:
@@ -453,7 +454,7 @@ class ChatSessionRepository:
 
 
 class LongMemoryRepository:
-    """表 ``long_memory``：长期记忆；可按用户、记忆类型筛选；长期固化按 (user_id, package_key) 唯一。"""
+    """表 ``long_memory``：长期记忆；可按用户、记忆类型筛选；(user_id, package_key) 对应唯一一行周期概要。"""
 
     @staticmethod
     def _dim_tuple(m: LongMemory) -> tuple[str, ...]:
@@ -601,7 +602,7 @@ class LongMemoryRepository:
 
     @staticmethod
     def upsert_by_user_pkg(conn: pymysql.connections.Connection, m: LongMemory) -> None:
-        """按 (user_id, package_key) 插入或更新一行（长期固化）。"""
+        """按 (user_id, package_key) 插入或更新一行（周期概要）。"""
         cols = LongMemoryRepository._dim_sql_columns()
         ph = LongMemoryRepository._dim_sql_placeholders()
         dup_sets = ", ".join([f"{k}=VALUES({k})" for k in LONG_MEMORY_DB_TEXT_COLUMNS])
@@ -626,10 +627,10 @@ class LongMemoryRepository:
         activity_window_seconds: int,
         min_gap_since_last_consolidate_seconds: int,
     ) -> List[Tuple[int, str, Optional[datetime]]]:
-        """候选固化任务。
+        """周期概要更新的候选任务。
 
         - ``activity_window_seconds``：在 ``chat_session`` 中出现过会话的时间跨度（用于发现「近期活跃」的 user×包）。
-        - ``min_gap_since_last_consolidate_seconds``：距上次 ``last_consolidate_time`` 至少间隔多久才再次固化（与拉取窗口无关）。
+        - ``min_gap_since_last_consolidate_seconds``：距上次 ``last_consolidate_time`` 至少间隔多久才再次触发周期概要更新（与拉取窗口无关）。
         """
         safe_activity = max(60, min(int(activity_window_seconds), 86400 * 14))
         safe_gap = max(60, min(int(min_gap_since_last_consolidate_seconds), 86400 * 14))
@@ -951,7 +952,7 @@ class RemindTriggerRepository:
     @staticmethod
     def insert(conn: pymysql.connections.Connection, t: RemindTrigger) -> int:
         sql = (
-            "INSERT INTO remind_trigger (user_id, trigger_type, trigger_time, memory_id, trigger_content, is_triggered) "
+            "INSERT INTO remind_trigger (user_id, trigger_type, trigger_time, session_id, trigger_content, is_triggered) "
             "VALUES (%s, %s, %s, %s, %s, %s)"
         )
         with conn.cursor() as cur:
@@ -961,7 +962,7 @@ class RemindTriggerRepository:
                     t.user_id,
                     t.trigger_type,
                     t.trigger_time,
-                    t.memory_id,
+                    t.session_id,
                     t.trigger_content,
                     t.is_triggered,
                 ),
@@ -973,7 +974,7 @@ class RemindTriggerRepository:
     @staticmethod
     def update(conn: pymysql.connections.Connection, t: RemindTrigger) -> int:
         sql = (
-            "UPDATE remind_trigger SET user_id=%s, trigger_type=%s, trigger_time=%s, memory_id=%s, "
+            "UPDATE remind_trigger SET user_id=%s, trigger_type=%s, trigger_time=%s, session_id=%s, "
             "trigger_content=%s, is_triggered=%s WHERE trigger_id=%s"
         )
         with conn.cursor() as cur:
@@ -984,7 +985,7 @@ class RemindTriggerRepository:
                         t.user_id,
                         t.trigger_type,
                         t.trigger_time,
-                        t.memory_id,
+                        t.session_id,
                         t.trigger_content,
                         t.is_triggered,
                         t.trigger_id,
@@ -1085,13 +1086,48 @@ class RemindTriggerRepository:
         return int(n)
 
     @staticmethod
+    def claim_pending_trigger(conn: pymysql.connections.Connection, trigger_id: int) -> bool:
+        """将 ``is_triggered`` 从 0 置 1；仅当仍为未触发时返回 True（用于防并发重复投递）。"""
+        sql = "UPDATE remind_trigger SET is_triggered = 1 WHERE trigger_id = %s AND is_triggered = 0"
+        with conn.cursor() as cur:
+            n = cur.execute(sql, (trigger_id,))
+        return int(n) == 1
+
+    @staticmethod
+    def release_trigger_claim(conn: pymysql.connections.Connection, trigger_id: int) -> int:
+        """投递失败时将 ``is_triggered`` 恢复为 0，便于下次扫描或重连补发。"""
+        sql = "UPDATE remind_trigger SET is_triggered = 0 WHERE trigger_id = %s AND is_triggered = 1"
+        with conn.cursor() as cur:
+            n = cur.execute(sql, (trigger_id,))
+        return int(n)
+
+    @staticmethod
+    def list_pending_for_user_before(
+        conn: pymysql.connections.Connection,
+        user_id: int,
+        before: datetime,
+        *,
+        limit: int = 100,
+    ) -> List[RemindTrigger]:
+        """某用户未触发且 ``trigger_time <= before``，按时间升序。"""
+        lim = max(1, min(int(limit), 10_000))
+        sql = (
+            "SELECT * FROM remind_trigger WHERE user_id = %s AND is_triggered = 0 "
+            "AND trigger_time <= %s ORDER BY trigger_time ASC LIMIT %s"
+        )
+        with conn.cursor() as cur:
+            cur.execute(sql, (user_id, before, lim))
+            rows = cur.fetchall()
+        return [RemindTriggerRepository._row(r) for r in rows]
+
+    @staticmethod
     def _row(row: Dict[str, Any]) -> RemindTrigger:
         return RemindTrigger(
             trigger_id=row["trigger_id"],
             user_id=row["user_id"],
             trigger_type=row["trigger_type"],
             trigger_time=_parse_dt(row.get("trigger_time")),
-            memory_id=row.get("memory_id"),
+            session_id=row.get("session_id"),
             trigger_content=row["trigger_content"],
             is_triggered=int(row["is_triggered"]),
             create_time=_parse_dt(row.get("create_time")),
@@ -1171,6 +1207,47 @@ class SystemConfigRepository:
             config_value=row["config_value"],
             config_desc=row.get("config_desc"),
             update_time=_parse_dt(row.get("update_time")),
+        )
+
+
+class BackgroundImageRepository:
+    """表 ``background_image``：背景显示名与 MinIO 公开 URL（可按 URL 推导 object_key 做预签名）。"""
+
+    TABLE = "background_image"
+
+    @staticmethod
+    def count_all(conn: pymysql.connections.Connection) -> int:
+        return _count(conn, f"SELECT COUNT(*) AS cnt FROM `{BackgroundImageRepository.TABLE}`")
+
+    @staticmethod
+    def get_random_one(conn: pymysql.connections.Connection) -> Optional[BackgroundImage]:
+        sql = f"SELECT * FROM `{BackgroundImageRepository.TABLE}` ORDER BY RAND() LIMIT 1"
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            row = cur.fetchone()
+        return BackgroundImageRepository._row(row) if row else None
+
+    @staticmethod
+    def list_all(
+        conn: pymysql.connections.Connection, *, limit: int = 500, offset: int = 0
+    ) -> List[BackgroundImage]:
+        lim, off = _page(limit, offset)
+        sql = (
+            f"SELECT * FROM `{BackgroundImageRepository.TABLE}` "
+            "ORDER BY id ASC LIMIT %s OFFSET %s"
+        )
+        with conn.cursor() as cur:
+            cur.execute(sql, (lim, off))
+            rows = cur.fetchall()
+        return [BackgroundImageRepository._row(r) for r in rows]
+
+    @staticmethod
+    def _row(row: Dict[str, Any]) -> BackgroundImage:
+        return BackgroundImage(
+            id=int(row["id"]),
+            name=str(row["name"] or ""),
+            url=str(row["url"] or ""),
+            create_time=_parse_dt(row.get("create_time")),
         )
 
 

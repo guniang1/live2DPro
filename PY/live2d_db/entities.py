@@ -73,7 +73,7 @@ class RemindTrigger:
     user_id: int = 0
     trigger_type: str = ""
     trigger_time: Optional[datetime] = None
-    memory_id: Optional[int] = None
+    session_id: Optional[int] = None
     trigger_content: str = ""
     is_triggered: int = 0
     create_time: Optional[datetime] = None
@@ -86,6 +86,16 @@ class SystemConfig:
     config_value: str = ""
     config_desc: Optional[str] = None
     update_time: Optional[datetime] = None
+
+
+@dataclass
+class BackgroundImage:
+    """表 ``background_image``：Demo 背景图（MinIO URL 索引）。"""
+
+    id: Optional[int] = None
+    name: str = ""
+    url: str = ""
+    create_time: Optional[datetime] = None
 
 
 @dataclass
