@@ -72,8 +72,9 @@ export const ViewLogicalMaxTop = 2.0;
 // ResourcesPath是资源路径（public 目录在开发/构建时被映射到根路径，故使用 /Resources/）
 export const ResourcesPath = '/Resources/';
 
-// 背景轮换路径列表（字符串数组，相对 Resources 根目录）。必须用可变对象挂载，以便 main.js 在 import * 后仍能写入。
-export const backgroundCycle = { paths: null };
+// 背景轮换：paths 可为相对 Resources 的路径，或以 http(s):// 开头的绝对 URL。
+// remoteRandom：首屏/切换来自 GET /api/background-images/random；displayName：对话 scene_location 用的逻辑名。
+export const backgroundCycle = { paths: null, remoteRandom: false, displayName: '' };
 
 // background_order.json 缺失或为空时的默认轮换顺序（路径相对于 Resources 根目录）
 export const BackgroundCyclePathsFallback = [

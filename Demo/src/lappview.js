@@ -14,6 +14,39 @@ import { LAppSprite } from './lappsprite.js';
 import { TouchManager } from './touchmanager.js';
 import { LAppSubdelegate } from './lappsubdelegate.js';
 
+/** @param {string} rel */
+function filenameStemFromBgPath(rel) {
+  const s = String(rel || '').replace(/\\/g, '/');
+  const base = s.split('/').filter(Boolean).pop() || s;
+  const dot = base.lastIndexOf('.');
+  return dot > 0 ? base.slice(0, dot) : base;
+}
+
+function syncLocalBackgroundDisplayName(relOrAbs) {
+  const s = String(relOrAbs || '').trim();
+  if (
+    !s ||
+    s.startsWith('http://') ||
+    s.startsWith('https://') ||
+    LAppDefine.backgroundCycle.remoteRandom
+  ) {
+    return;
+  }
+  LAppDefine.backgroundCycle.displayName = filenameStemFromBgPath(s);
+}
+
+/** @param {string} relOrAbs @param {string} resourcesPath */
+function resolveBackgroundFullUrl(relOrAbs, resourcesPath) {
+  const s = String(relOrAbs || '').trim();
+  if (!s) {
+    return resourcesPath + LAppDefine.getBackImageName();
+  }
+  if (s.startsWith('http://') || s.startsWith('https://')) {
+    return s;
+  }
+  return resourcesPath + s;
+}
+
 /**
  * 绘制类
  */
@@ -130,7 +163,11 @@ export class LAppView {
       paths && paths.length > 0
         ? paths[this._currentBgIndex]
         : LAppDefine.getBackImageName();
-    this._backgroundFullUrl = resourcesPath + backImageName;
+    this._backgroundFullUrl = resolveBackgroundFullUrl(
+      backImageName,
+      resourcesPath
+    );
+    syncLocalBackgroundDisplayName(backImageName);
 
     const initBackGroundTexture = (textureInfo) => {
       const x = width * 0.5;
@@ -155,12 +192,52 @@ export class LAppView {
   }
 
   getBackgroundCycleLabel() {
+    if (LAppDefine.backgroundCycle.remoteRandom && LAppDefine.backgroundCycle.displayName) {
+      return LAppDefine.backgroundCycle.displayName;
+    }
     const paths = LAppDefine.backgroundCycle.paths;
     if (!paths || paths.length === 0) {
       return LAppDefine.getBackImageName().split('/').pop() || '';
     }
     const rel = paths[this._currentBgIndex];
+    if (String(rel).startsWith('http://') || String(rel).startsWith('https://')) {
+      try {
+        const u = new URL(rel);
+        const seg = u.pathname.split('/').filter(Boolean).pop();
+        return seg || rel;
+      } catch {
+        return rel;
+      }
+    }
     return rel.split('/').pop() || rel;
+  }
+
+  applyBackgroundFullUrl(fullUrl) {
+    const next = String(fullUrl || '').trim();
+    if (!next) {
+      return;
+    }
+    const textureManager = this._subdelegate.getTextureManager();
+    const width = this._subdelegate.getCanvas().width;
+    const height = this._subdelegate.getCanvas().height;
+    const fullOld = this._backgroundFullUrl;
+
+    textureManager.createTextureFromPngFile(next, false, (textureInfo) => {
+      const x = width * 0.5;
+      const y = height * 0.5;
+      const fwidth = textureInfo.width * 2.0;
+      const fheight = height * 0.95;
+
+      if (this._back) {
+        this._back.releaseGeometryOnly();
+        textureManager.releaseTextureByFilePath(fullOld);
+      }
+
+      this._back = new LAppSprite(x, y, fwidth, fheight, textureInfo.id);
+      this._back.setSubdelegate(this._subdelegate);
+      this._currentBgIndex = 0;
+      this._backgroundFullUrl = next;
+    });
   }
 
   cycleBackground() {
@@ -172,7 +249,7 @@ export class LAppView {
     const resourcesPath = LAppDefine.ResourcesPath;
     const nextIndex = (this._currentBgIndex + 1) % paths.length;
     const nextRel = paths[nextIndex];
-    const fullNext = resourcesPath + nextRel;
+    const fullNext = resolveBackgroundFullUrl(nextRel, resourcesPath);
     const fullOld = this._backgroundFullUrl;
 
     const textureManager = this._subdelegate.getTextureManager();
@@ -194,6 +271,7 @@ export class LAppView {
       this._back.setSubdelegate(this._subdelegate);
       this._currentBgIndex = nextIndex;
       this._backgroundFullUrl = fullNext;
+      syncLocalBackgroundDisplayName(nextRel);
     });
   }
 

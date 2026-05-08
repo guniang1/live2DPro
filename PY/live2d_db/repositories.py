@@ -32,7 +32,6 @@ from .entities import (
     LongMemory,
     Persona,
     RemindTrigger,
-    SystemConfig,
     User,
     UserProfile,
 )
@@ -1131,82 +1130,6 @@ class RemindTriggerRepository:
             trigger_content=row["trigger_content"],
             is_triggered=int(row["is_triggered"]),
             create_time=_parse_dt(row.get("create_time")),
-        )
-
-
-class SystemConfigRepository:
-    """表 ``system_config``：键值配置；读用 :meth:`get_by_key`，改值可用 :meth:`update_value`。"""
-
-    @staticmethod
-    def insert(conn: pymysql.connections.Connection, c: SystemConfig) -> int:
-        sql = "INSERT INTO system_config (config_key, config_value, config_desc) VALUES (%s, %s, %s)"
-        with conn.cursor() as cur:
-            cur.execute(sql, (c.config_key, c.config_value, c.config_desc))
-            return int(cur.lastrowid)
-
-    create = insert
-
-    @staticmethod
-    def get_by_id(conn: pymysql.connections.Connection, config_id: int) -> Optional[SystemConfig]:
-        sql = "SELECT * FROM system_config WHERE config_id = %s"
-        with conn.cursor() as cur:
-            cur.execute(sql, (config_id,))
-            row = cur.fetchone()
-        return SystemConfigRepository._row(row) if row else None
-
-    @staticmethod
-    def get_by_key(conn: pymysql.connections.Connection, config_key: str) -> Optional[SystemConfig]:
-        sql = "SELECT * FROM system_config WHERE config_key = %s"
-        with conn.cursor() as cur:
-            cur.execute(sql, (config_key,))
-            row = cur.fetchone()
-        return SystemConfigRepository._row(row) if row else None
-
-    @staticmethod
-    def update_value(conn: pymysql.connections.Connection, config_key: str, config_value: str) -> int:
-        sql = "UPDATE system_config SET config_value = %s WHERE config_key = %s"
-        with conn.cursor() as cur:
-            n = cur.execute(sql, (config_value, config_key))
-        return int(n)
-
-    @staticmethod
-    def update(conn: pymysql.connections.Connection, c: SystemConfig) -> int:
-        sql = (
-            "UPDATE system_config SET config_key=%s, config_value=%s, config_desc=%s WHERE config_id=%s"
-        )
-        with conn.cursor() as cur:
-            return int(
-                cur.execute(sql, (c.config_key, c.config_value, c.config_desc, c.config_id)),
-            )
-
-    @staticmethod
-    def delete_by_id(conn: pymysql.connections.Connection, config_id: int) -> int:
-        sql = "DELETE FROM system_config WHERE config_id = %s"
-        with conn.cursor() as cur:
-            return int(cur.execute(sql, (config_id,)))
-
-    @staticmethod
-    def delete_by_key(conn: pymysql.connections.Connection, config_key: str) -> int:
-        sql = "DELETE FROM system_config WHERE config_key = %s"
-        with conn.cursor() as cur:
-            return int(cur.execute(sql, (config_key,)))
-
-    @staticmethod
-    def list_all(conn: pymysql.connections.Connection) -> List[SystemConfig]:
-        sql = "SELECT * FROM system_config ORDER BY config_id"
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            rows = cur.fetchall()
-        return [SystemConfigRepository._row(r) for r in rows]
-
-    @staticmethod
-    def _row(row: Dict[str, Any]) -> SystemConfig:
-        return SystemConfig(
-            config_id=row["config_id"],
-            config_key=row["config_key"],
-            config_value=row["config_value"],
-            config_desc=row.get("config_desc"),
-            update_time=_parse_dt(row.get("update_time")),
         )
 
 

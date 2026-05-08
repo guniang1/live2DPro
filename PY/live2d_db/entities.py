@@ -80,15 +80,6 @@ class RemindTrigger:
 
 
 @dataclass
-class SystemConfig:
-    config_id: Optional[int] = None
-    config_key: str = ""
-    config_value: str = ""
-    config_desc: Optional[str] = None
-    update_time: Optional[datetime] = None
-
-
-@dataclass
 class BackgroundImage:
     """表 ``background_image``：Demo 背景图（MinIO URL 索引）。"""
 

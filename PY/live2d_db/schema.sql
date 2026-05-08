@@ -10,7 +10,6 @@ DROP TABLE IF EXISTS `long_memory`;
 DROP TABLE IF EXISTS `user_profile`;
 DROP TABLE IF EXISTS `live2d_tts_refer`;
 DROP TABLE IF EXISTS `live2d_model_asset`;
-DROP TABLE IF EXISTS `system_config`;
 DROP TABLE IF EXISTS `persona`;
 DROP TABLE IF EXISTS `user`;
 
@@ -49,18 +48,7 @@ CREATE TABLE `persona` (
   CONSTRAINT `fk_persona_user_scope` FOREIGN KEY (`user_id`) REFERENCES `user` (`user_id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='人设管理表（含全局模板与按模型包绑定）';
 
--- 3. system_config（系统配置表）
-CREATE TABLE `system_config` (
-  `config_id` INT NOT NULL AUTO_INCREMENT COMMENT '配置ID',
-  `config_key` VARCHAR(50) NOT NULL COMMENT '配置键(记忆压缩轮数/扫描频率)',
-  `config_value` VARCHAR(255) NOT NULL COMMENT '配置值',
-  `config_desc` VARCHAR(255) DEFAULT NULL COMMENT '配置描述',
-  `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-  PRIMARY KEY (`config_id`),
-  UNIQUE KEY `uk_config_key` (`config_key`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='系统配置表';
-
--- 4. live2d_model_asset（用户维度：模型包资源索引；动作/表情/模型文件均可入库；public_url 对 OSS/CDN）
+-- 3. live2d_model_asset（用户维度：模型包资源索引；动作/表情/模型文件均可入库；public_url 对 OSS/CDN）
 CREATE TABLE `live2d_model_asset` (
   `asset_id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '资源行ID',
   `user_id` INT NOT NULL COMMENT '关联用户（资源归属；每用户一套模型包）',
@@ -90,7 +78,7 @@ CREATE TABLE `live2d_model_asset` (
   CONSTRAINT `fk_model_asset_user` FOREIGN KEY (`user_id`) REFERENCES `user` (`user_id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户 Live2D 模型资源目录（含动作/表情等文件元数据）';
 
--- 5. live2d_tts_refer（模型包级参考音频绑定：每用户+每模型包一条）
+-- 4. live2d_tts_refer（模型包级参考音频绑定：每用户+每模型包一条）
 CREATE TABLE `live2d_tts_refer` (
   `refer_id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '参考音频绑定ID',
   `user_id` INT NOT NULL COMMENT '关联用户ID',
@@ -109,7 +97,7 @@ CREATE TABLE `live2d_tts_refer` (
   CONSTRAINT `fk_tts_refer_user` FOREIGN KEY (`user_id`) REFERENCES `user` (`user_id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='模型包级参考音频绑定（每用户每包唯一）';
 
--- 6. user_profile（用户画像表）
+-- 5. user_profile（用户画像表）
 CREATE TABLE `user_profile` (
   `profile_id` INT NOT NULL AUTO_INCREMENT COMMENT '画像ID',
   `user_id` INT NOT NULL COMMENT '关联用户ID',
@@ -123,7 +111,7 @@ CREATE TABLE `user_profile` (
   CONSTRAINT `fk_profile_user` FOREIGN KEY (`user_id`) REFERENCES `user` (`user_id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户画像表';
 
--- 7. chat_session（对话存储表）
+-- 6. chat_session（对话存储表）
 CREATE TABLE `chat_session` (
   `session_id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '对话记录ID',
   `user_id` INT NOT NULL COMMENT '关联用户ID',
@@ -141,7 +129,7 @@ CREATE TABLE `chat_session` (
   CONSTRAINT `fk_chat_user` FOREIGN KEY (`user_id`) REFERENCES `user` (`user_id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对话存储表';
 
--- 8. long_memory（每用户 + 每模型包一行；长期文本仅 period_overview）
+-- 7. long_memory（每用户 + 每模型包一行；长期文本仅 period_overview）
 CREATE TABLE `long_memory` (
   `memory_id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '记忆ID',
   `user_id` INT NOT NULL COMMENT '关联用户ID',
@@ -157,14 +145,14 @@ CREATE TABLE `long_memory` (
   CONSTRAINT `fk_memory_user` FOREIGN KEY (`user_id`) REFERENCES `user` (`user_id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='核心记忆表';
 
--- 9. remind_trigger（待办事项/主动关怀核心表）
+-- 8. remind_trigger（待办事项/主动关怀核心表）
 CREATE TABLE `remind_trigger` (
   `trigger_id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '触发ID',
   `user_id` INT NOT NULL COMMENT '关联用户ID',
   `trigger_type` VARCHAR(30) NOT NULL COMMENT '触发类型(生日/考试/纪念日/日常关怀)',
   `trigger_time` DATETIME NOT NULL COMMENT '触发时间',
   `session_id` BIGINT DEFAULT NULL COMMENT '关联 chat_session：产生该提醒的单轮对话，投递话术据此召回语境',
-  `trigger_content` TEXT NOT NULL COMMENT '情景详细描述（触发时结合语境生成话术，非最终台词）',
+  `trigger_content` TEXT NOT NULL COMMENT '情景详细描述（与 REST/WebSocket JSON 中 trigger_content 同义；面向用户台词为 WS 帧 delivery_message）',
   `is_triggered` TINYINT NOT NULL DEFAULT 0 COMMENT '是否触发(0-未触发 1-已触发)',
   `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   PRIMARY KEY (`trigger_id`),

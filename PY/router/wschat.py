@@ -48,6 +48,7 @@ from utils.user_profile_refresh import (
     maybe_refresh_user_profile_after_turn,
     refresh_user_profile_on_disconnect,
 )
+from utils.short_term_summary import maybe_push_short_term_summary_after_turn
 from utils.live2d_catalog import (
     get_catalog_for_package,
     normalize_expression_pick,
@@ -132,7 +133,7 @@ def _unregister_chat_ws_for_user(user_id: int, websocket: WebSocket) -> None:
 
 
 def _remind_trigger_ws_payload(t: RemindTrigger, *, display_content: str) -> dict:
-    """``display_content`` 为触发时点生成的对用户话术；库表 ``trigger_content`` 仍为情景描述。"""
+    """与 REST 一致：``trigger_content`` = 库内情景描述；``delivery_message`` = 当次 LLM 生成的面向用户台词。"""
     tt = t.trigger_time
     ts = None
     if isinstance(tt, datetime):
@@ -141,7 +142,8 @@ def _remind_trigger_ws_payload(t: RemindTrigger, *, display_content: str) -> dic
         "type": "remind_trigger",
         "trigger_id": t.trigger_id,
         "trigger_type": t.trigger_type,
-        "trigger_content": (display_content or "").strip(),
+        "trigger_content": (t.trigger_content or "").strip(),
+        "delivery_message": (display_content or "").strip(),
         "trigger_time": ts,
     }
 
@@ -158,7 +160,8 @@ async def _deliver_remind_trigger_on_websocket(
 ) -> bool:
     """先按语境生成话术并下发 ``remind_trigger`` JSON；若 MiMo 可用则再下发 ``chunk_audio``（``remind_audio``）+ WAV。
 
-    话术由 ``session_id`` 关联的单轮对话 + 库中情景描述（``trigger_content``）经 LLM 生成；MiMo 朗读该生成稿。
+    话术由 ``remind_delivery.generate_remind_delivery_message`` 综合库内情景、``session_id`` 单轮、
+    Redis **瞬时**多轮对话（当前包，不含短期压缩层）、人设与用户画像等经 LLM **当场重写**；MiMo 朗读该生成稿。
     """
     pkg = _live2d_package_from_websocket(websocket)
     from utils.remind_delivery import generate_remind_delivery_message
@@ -1073,6 +1076,14 @@ def _append_turn_to_redis_history(
                     user_id,
                     package_key,
                 )
+            try:
+                maybe_push_short_term_summary_after_turn(cli, user_id, package_key)
+            except Exception:
+                logger.exception(
+                    "短期记忆周期摘要调度异常 user_id=%s package=%s",
+                    user_id,
+                    package_key,
+                )
 
 
 def ollama_chat_stream_options() -> dict:
@@ -1262,6 +1273,12 @@ def parse_action_json(text: str, cat) -> tuple[str, str, str | None]:
     return ex_sw, mo_sw, reason
 
 
+# --- 动作/表情 LLM（OLLAMA_ACTION_MODEL）上下文 ---------------------------------
+# user 侧：人设(MySQL _package_persona_chat_extra_sync) + 瞬时(Redis read_instant_turns_chronological)
+# + 本轮输入；多段时文首【选题对象】强调 expression/motion 归属 Live2D 虚拟角色（助手），非真人用户。
+# system：catalog.action_llm_system_text + 选型对象为角色的追加句。不注入主对话短期/长期 system 块。
+# ------------------------------------------------------------------------------
+
 def _format_instant_turns_for_action_llm(
     turns: list[dict[str, str]],
     *,
@@ -1448,9 +1465,9 @@ WebSocket 聊天接口
     - 流式内容（``TTS_PROVIDER=mimo`` 且已配置 ``MIMO_API_KEY``，或已配置 GPT-SoVITS 参考音频时）：默认按 **标点攒批**（``TTS_FLUSH_EVERY_N_SENTENCE_END``，默认每 4 个标点一次合成）下发 ``{"type":"chunk_audio",...}``（首条可带 ``expression``/``motion``），**紧接**一条二进制 WAV；合成完成后才推送该段文本与音频。**流水线**：攒满一段即入队，**不等待**该段合成结束即可继续收 token 攒下一段；并行合成路数由 ``TTS_STREAM_PIPELINE_SLOTS``（优先）或 ``TTS_PARALLEL_WORKERS`` / ``TTS_PARALLEL_WORKERS_MIMO`` 决定，前端仍 **按 segment index 递增** 收音频。MiMo 音色克隆可按批重复上传参考音频；若希望整轮只请求一次云端合成，设 ``MIMO_TTS_WS_SINGLE_SHOT=1``（全文结束后单次 ``chunk_audio``）。MiMo 默认附带 **导演指令**（仅 MySQL 人设：``character_desc`` / ``tone_style``，对应【人设】【语气】）；``MIMO_TTS_WS_INCLUDE_DIRECTOR=0`` 可关。
     - 完成标记：{"type": "done"}
     - 错误信息：{"type": "error", "message": "错误描述"}
-    - 定时场景（生日、纪念日、考试等）：{"type": "remind_trigger", "trigger_content": …} 中的 ``trigger_content``
-      为**触发时点生成**的台词（服务端按 ``session_id``→``chat_session`` 单轮原文与情景描述生成）；库表同名列存情景描述。随后若 MiMo 已配置且未关闭 ``REMIND_TRIGGER_USE_MIMO``，
-      可再跟 ``chunk_audio``（``remind_audio``）+ WAV（朗读该生成稿）。
+    - 定时场景（生日、纪念日、考试等）：``{"type":"remind_trigger","trigger_content":…,"delivery_message":…}``。
+      ``trigger_content`` 与 ``GET /api/remind-triggers`` **语义一致**，均为库内**情景详细描述**；``delivery_message`` 为投递当次 **LLM 重新撰写**的面向用户台词（输入含情景、``session_id`` 单轮、Redis **瞬时**多轮对话、人设与用户画像等）。随后若 MiMo 已配置且未关闭 ``REMIND_TRIGGER_USE_MIMO``，
+      可再跟 ``chunk_audio``（``remind_audio``）+ WAV（朗读 ``delivery_message``）。
 
     可选遗留：``/ws/tts`` 仍可容纳连接，但默认前端已不再使用；朗读数据走 ``/ws/chat``。
     客户端切换 Resources 下模型目录时，应对 ``/ws/chat`` 重连并带上 ``?package=<目录名>``，使首条 catalog 与动作 LLM 扫描该包。
@@ -2108,6 +2125,7 @@ async def chat_websocket(websocket: WebSocket):
                                     _arf,
                                     package_key=session_catalog.package_key,
                                     session_id=turn_session_id,
+                                    scene_time=scene_time,
                                 )
                             except Exception:
                                 logger.exception(

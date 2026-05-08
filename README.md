@@ -8,7 +8,7 @@
 |------|------|
 | `Demo/` | Vite 前端；进入目录后执行 `npm install`、`npm run build` |
 | `PY/` | FastAPI 服务与数据库/记忆等脚本 |
-| `docs/` | 架构、接口与论文说明类文档 |
+| `docs/` | **`前端项目正文.md`**、**`后端项目正文.md`**（合并后的工程说明与附录） |
 | `Core/`、`Framework/`、`Samples/` | Cubism SDK 与示例（遵循各自许可证） |
 
 ## 未纳入版本库的内容
@@ -21,4 +21,4 @@
 - `minio_data/` — 本地 MinIO 数据目录
 - `**/node_modules/`、`Demo/dist/`、`**/.env` — 依赖、构建输出与密钥
 
-更细的架构与接口说明见 `docs/`。
+更细的架构与接口说明见 `docs/前端项目正文.md` 与 `docs/后端项目正文.md`。

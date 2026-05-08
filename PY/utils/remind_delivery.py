@@ -1,7 +1,9 @@
 """定时关怀投递时生成对用户说的话术。
 
-库表 ``remind_trigger.trigger_content`` 存**情景详细描述**；投递时按 ``session_id`` 读取 ``chat_session``
-单轮原文，与情景一并交给 LLM 当场生成最终台词。
+库表 ``remind_trigger.trigger_content`` 存**情景详细描述**；投递时由 LLM **重新生成**面向用户的台词：
+结合库内情景、``session_id`` 对应单轮 ``chat_session``、当前模型包在 Redis 中的**瞬时记忆**（与 ``/ws/chat``
+同键分桶；**仅**最近多轮对话原文列表，**不含**短期压缩层）、可选人设块与用户画像块，在**触发/补发当次**
+拼入提示词后调用 Ollama。WebSocket 帧中 ``delivery_message`` 承载生成稿；``trigger_content`` 与 REST 一致，均为库内情景原文。
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ import ollama
 from live2d_db.connection import connection_ctx
 from live2d_db.db_config import DbConfig
 from live2d_db.entities import RemindTrigger
+from live2d_db.memory_layers import read_instant_turns_chronological
+from live2d_db.redis_factory import get_redis_client
 from live2d_db.repositories import ChatSessionRepository, UserProfileRepository
 from utils.user_profile_refresh import chat_inject_enabled, format_profile_for_chat_system
 
@@ -22,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_OUT_CHARS = 800
 _MAX_SESSION_TURN_CHARS = 12_000
+_MAX_INSTANT_BLOCK = 4500
 
 
 def _delivery_model() -> str:
@@ -54,6 +59,40 @@ def _ollama_message_content(resp: object) -> str:
         return str(m.get("content") or "").strip()
     c = getattr(m, "content", None)
     return str(c).strip() if c is not None else ""
+
+
+def _redis_instant_memory_prompt_block(user_id: int, package_key: str) -> str:
+    """与主对话相同分桶的 Redis 瞬时 List（当前对话多轮原文），不含短期压缩层。"""
+    if user_id < 1:
+        return ""
+    cli = get_redis_client(logger)
+    if cli is None:
+        return ""
+    try:
+        turns = read_instant_turns_chronological(cli, user_id, package_key)
+    except Exception:
+        logger.exception(
+            "关怀话术：读取瞬时记忆失败 user_id=%s package=%s",
+            user_id,
+            package_key,
+        )
+        turns = []
+    if not turns:
+        return ""
+    instant_lines: list[str] = []
+    for turn in turns:
+        u = (turn.get("u") or "").strip()
+        a = (turn.get("a") or "").strip()
+        if u:
+            instant_lines.append(f"用户：{u}")
+        if a:
+            instant_lines.append(f"助手：{a}")
+    block = "\n".join(instant_lines).strip()
+    if len(block) > _MAX_INSTANT_BLOCK:
+        block = block[: _MAX_INSTANT_BLOCK - 1].rstrip() + "…"
+    if not block:
+        return ""
+    return f"【当前对话瞬时记忆（Redis，当前模型包；不含短期压缩摘要）】\n{block}"
 
 
 def _session_dialogue_prompt_block(t: RemindTrigger) -> str:
@@ -128,13 +167,14 @@ def delivery_use_llm() -> bool:
 
 
 def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
-    """结合 ``session_id`` 对应单轮对话与情景描述，生成对用户展示的话术。"""
+    """结合情景描述、关联单轮、Redis 瞬时多轮对话与人设/画像，由 LLM 重新生成对用户展示的话术。"""
     if not delivery_use_llm():
         return _fallback_line(t)
 
     scenario = (t.trigger_content or "").strip()
     session_text = _session_dialogue_prompt_block(t)
     pkg = (package_key or "").strip() or "default"
+    memory_block = _redis_instant_memory_prompt_block(int(t.user_id), pkg)
 
     persona = ""
     try:
@@ -162,17 +202,19 @@ def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
                 t.user_id,
             )
 
-    if not scenario and not session_text:
+    if not scenario and not session_text and not memory_block:
         return _fallback_line(t)
 
     system = (
         "你是 Live2D 数字人，正在对用户执行一条「预约定时关怀」。\n"
         "输入可能依次包含：【当前模型人设】；【用户画像】——系统侧对用户标签、情感基调、偏好与困扰等的摘要，"
         "用于你了解对方并写出更贴切的问候（勿逐条背诵画像原文，也不要向用户暴露「画像」「系统」等字眼）；"
+        "【当前对话瞬时记忆】——来自 Redis List、与主对话同包分桶的**最近多轮原文**（不含短期压缩摘要层；"
+        "可能晚于提醒创建时刻，代表用户**此刻**正在聊的内容；若无则该段落不出现）；"
         "【关怀类型】；【情景详细描述】（创建提醒时写入库的客观记录，不是最终台词）；"
-        "【关联对话原文】（来自 remind_trigger.session_id 对应的单轮 chat_session）。\n"
-        "请生成你对用户**当场说出**的一段话：1～3 句中文，口语化、自然温暖；以情景与关联对话为主，"
-        "可适度呼应画像中的偏好与情绪基调；**不要编造对话与情景中均不存在的事实**。\n"
+        "【关联对话原文】（来自 remind_trigger.session_id 对应的单轮 chat_session，即产生提醒时的那一轮）。\n"
+        "请**重新撰写**你对用户**当场说出**的一段话：1～3 句中文，口语化、自然温暖；以情景详细描述与"
+        "当前瞬时对话为主轴，可呼应关联单轮与人设/画像；**不要编造各材料中均不存在的事实**。\n"
         "禁止输出 JSON、列表、Markdown；不要复述栏目名。"
     )
     parts: list[str] = []
@@ -180,6 +222,8 @@ def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
         parts.append(persona)
     if profile_block:
         parts.append(profile_block)
+    if memory_block:
+        parts.append(memory_block)
     parts.append(f"【关怀类型】{t.trigger_type}")
     parts.append(f"【情景详细描述】\n{scenario or '（未提供）'}")
     parts.append(f"【关联对话原文】\n{session_text or '（未绑定）'}")

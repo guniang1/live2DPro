@@ -141,26 +141,135 @@ def _extract_json_blob(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _parse_trigger_time(raw: str) -> datetime | None:
+def _coerce_reminders_root(parsed: Any) -> dict[str, Any] | None:
+    """将 ``json.loads`` 结果规范为含 ``reminders`` 的字典。
+
+    兼容：顶层数组 ``[]`` / ``[{...}]``（部分小模型在 ``format=json`` 下只输出数组）、
+    以及单条提醒对象未包在 ``reminders`` 键下的情况。
+    """
+    if isinstance(parsed, list):
+        return {"reminders": parsed}
+    if not isinstance(parsed, dict):
+        return None
+    if "reminders" in parsed or "items" in parsed or "triggers" in parsed:
+        return parsed
+    if "trigger_type" in parsed and (
+        "trigger_time" in parsed
+        or "trigger_content" in parsed
+        or "scenario_detail" in parsed
+    ):
+        return {"reminders": [parsed]}
+    return None
+
+
+def _parse_llm_reminder_json(text: str) -> dict[str, Any] | None:
+    """解析抽取模型输出：整段 JSON（含裸 ``[]``）、或文中嵌入的 ``{...}``。"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    for candidate in (text, _sanitize_llm_json_blob(text)):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        coerced = _coerce_reminders_root(parsed)
+        if coerced is not None:
+            return coerced
+    embedded = _extract_json_blob(text)
+    if embedded is not None:
+        return _coerce_reminders_root(embedded)
+    return None
+
+
+def _parse_scene_time_string(raw: str | None) -> datetime | None:
+    """解析前端 ``scene_time``（如 zh-CN ``2026/5/9 14:30:45``）；失败则返回 None。"""
     s = (raw or "").strip()
     if not s:
         return None
-    s = s.replace("Z", "").split("+")[0].strip()
-    if "T" in s or " " in s[:11]:
+    # 去掉常见星期前缀，便于匹配日期段
+    s = re.sub(
+        r"^(?:周[一二三四五六日天]|星期[一二三四五六日天])+[,，\s]*",
+        "",
+        s,
+    )
+    m = re.search(
+        r"(?P<y>\d{4})\s*[/\-\.年]\s*(?P<mo>\d{1,2})\s*[/\-\.月]\s*(?P<d>\d{1,2})\s*日?"
+        r"(?:\s+(?P<h>\d{1,2}):(?P<mi>\d{1,2})(?::(?P<sec>\d{1,2}))?)?",
+        s,
+    )
+    if m:
+        y, mo, d = int(m["y"]), int(m["mo"]), int(m["d"])
+        h = int(m.group("h") or 0)
+        mi = int(m.group("mi") or 0)
+        sec = int(m.group("sec") or 0)
         try:
-            return datetime.fromisoformat(s.replace(" ", "T", 1)[:19])
+            return datetime(y, mo, d, h, mi, sec)
         except ValueError:
-            try:
-                return datetime.fromisoformat(s[:16])
-            except ValueError:
-                pass
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", s)
-    if m:
-        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), 9, 0, 0)
-    m = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?", s)
-    if m:
-        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), 9, 0, 0)
-    return None
+            pass
+    try:
+        norm = s.replace(" ", "T", 1) if " " in s and "T" not in s else s
+        return datetime.fromisoformat(norm[:19])
+    except ValueError:
+        return None
+
+
+def _parse_trigger_time(raw: str) -> datetime | None:
+    """解析模型输出的触发时刻；支持粗粒度（仅需年月、年月日、或到小时），缺失部分按规则补齐。
+
+    - ``YYYY-MM`` → 该月 1 日 09:00:00
+    - ``YYYY-MM-DD``（无时刻）→ 当日 09:00:00
+    - 有时刻仅到小时（如 ``2026-05-09T13``、``2026-05-09 13``）→ 该小时 00 分 00 秒
+    - 含分即可不带秒（解析后秒为 0）
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None
+    s = s.replace("Z", "").split("+")[0].strip().replace("/", "-")
+
+    # 仅年月（整月粒度）
+    m_ym = re.match(r"^(\d{4})-(\d{1,2})$", s)
+    if m_ym:
+        y, mo = int(m_ym.group(1)), int(m_ym.group(2))
+        try:
+            return datetime(y, mo, 1, 9, 0, 0)
+        except ValueError:
+            return None
+
+    y: int | None = None
+    mo: int | None = None
+    d: int | None = None
+    rest = ""
+
+    md = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if md:
+        y, mo, d = int(md.group(1)), int(md.group(2)), int(md.group(3))
+        rest = s[md.end() :].strip()
+    else:
+        mc = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?", s)
+        if mc:
+            y, mo, d = int(mc.group(1)), int(mc.group(2)), int(mc.group(3))
+            rest = s[mc.end() :].strip()
+        else:
+            return None
+
+    rest = re.sub(r"^[Tt\s]+", "", rest)
+    if "." in rest:
+        rest = rest.split(".", 1)[0].strip()
+    h, mi, sec = 9, 0, 0
+    if rest:
+        tm = re.match(r"^(\d{1,2})(?::(\d{1,2})(?::(\d{1,2}))?)?", rest)
+        if tm:
+            h = int(tm.group(1))
+            mi = int(tm.group(2)) if tm.group(2) is not None else 0
+            sec = int(tm.group(3)) if tm.group(3) is not None else 0
+    try:
+        return datetime(y, mo, d, h, mi, sec)
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(s.replace(" ", "T", 1))
+    except ValueError:
+        return None
 
 
 def _truncate_ctx(text: str, max_chars: int) -> str:
@@ -296,25 +405,86 @@ def _roll_trigger_time_to_future(dt: datetime, now: datetime) -> datetime:
 
 
 def _normalize_trigger_type(raw: object) -> str | None:
+    """将模型输出的 ``trigger_type`` 规范为四字枚举之一；无法识别时返回 ``None``（由上层决定是否降级）。"""
     if raw is None:
         return None
     s = str(raw).strip()
+    if not s:
+        return None
     if s in _ALLOWED_TYPES:
         return s
-    if "生日" in s:
+    # 全角拉丁字母 → 半角，便于匹配英文枚举
+    fw = "ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ"
+    hw = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    s_lat = s.translate(str.maketrans(fw, hw))
+    low = s_lat.casefold()
+
+    if "birthday" in low:
         return "生日"
-    if "纪念日" in s or "周年" in s:
+    if "anniversary" in low:
         return "纪念日"
-    if "考试" in s or "考研" in s or "期末" in s or "高考" in s:
+    if any(
+        k in low for k in ("exam", "quiz", "midterm", "final", "interview")
+    ):
         return "考试"
-    if "关怀" in s or "提醒" in s:
+    if "测试" in s:
+        return "考试"
+
+    if "生日" in s or "生辰" in s or "诞辰" in s or "庆生" in s:
+        return "生日"
+    if "纪念日" in s or "周年" in s or "婚庆" in s:
+        return "纪念日"
+    if (
+        "考试" in s
+        or "考研" in s
+        or "期末" in s
+        or "高考" in s
+        or "面试" in s
+        or "答辩" in s
+        or "复试" in s
+        or "笔试" in s
+    ):
+        return "考试"
+    if (
+        "关怀" in s
+        or "提醒" in s
+        or "问候" in s
+        or "祝福" in s
+        or "祝贺" in s
+        or "定时" in s
+        or "预约" in s
+    ):
+        return "日常关怀"
+    if any(k in low for k in ("daily", "reminder", "routine", "schedule")):
         return "日常关怀"
     return None
 
 
 def _call_extract_llm(
-    user_input: str, ai_reply: str, *, context_prefix: str = ""
+    user_input: str,
+    ai_reply: str,
+    *,
+    context_prefix: str = "",
+    reference_now: datetime | None = None,
+    server_now: datetime | None = None,
 ) -> dict[str, Any] | None:
+    """``server_now`` 为运行进程本地系统时间（与调度扫描一致）；``reference_now`` 为相对语义基准（多为设备上报）。"""
+    srv = server_now if server_now is not None else datetime.now()
+    ref = reference_now if reference_now is not None else srv
+    ts_fmt = "%Y-%m-%d %H:%M:%S"
+    ref_line = (
+        f"【服务器当前时间（系统本地时间，后端判定到期与此对齐）】{srv.strftime(ts_fmt)}\n"
+        f"【对话语境参考时间】{ref.strftime(ts_fmt)}"
+        " —— 当前消息附带用户设备时间时已与之对齐；否则与服务器当前时间相同。\n"
+        "你必须**自行完成全部时刻推算**（不要用占位日期搪塞）。相对说法一律以【对话语境参考时间】为起点换算。"
+        "「明天」「后天」「下个月」等都要换算成具体公历日期。\n"
+        "trigger_time 写到对话里承诺的精度即可（后端会补齐缺失的分秒）："
+        "仅约定「某月」「某天」「某天上午/下午某时」时，可用 ``YYYY-MM``、``YYYY-MM-DD``、``YYYY-MM-DDTHH`` 等粗格式；"
+        "若约定「几分钟后」「几小时后」等短时偏移，必须在参考时间上做完加减法，写出对应的具体日期时间（至少到分钟更稳妥，"
+        "但若模型只愿给到整点也可接受 ``…THH``）。完整 ISO 亦可。\n"
+        "公历年**默认与【对话语境参考时间】的自然年相同**；只有用户或助手明确说过「明年」「下一年」等才可顺延到下一年。\n"
+        "禁止无依据写成参考年的下一年（例如参考为 2026 却写 2027）。\n\n"
+    )
     system = (
         "你是信息抽取器。根据给定的一轮对话（用户与助手各一段），判断是否包含可以落实到具体日期或时间的"
         "将来事项，用于数字人稍后主动关怀。\n\n"
@@ -325,19 +495,18 @@ def _call_extract_llm(
         "4. 考试：明确考试、面试、答辩等日期。\n"
         "5. 日常关怀：用户明确约定未来某日要做某事、需要被提醒或问候，且不属于以上三类。\n"
         "6. 若没有可信的具体日期/时间，或纯属泛泛闲聊、情绪倾诉而无日程，必须输出空列表。\n"
-        "7. trigger_time 使用 ISO8601（推荐 YYYY-MM-DDTHH:MM:SS）；若只有日期则用当日 09:00:00。\n"
-        "   年份必须与用户语义一致：用户说「今年 6 月 15 日」则必须用当前自然年，禁止无故写成过去一年。\n"
-        "   若用户未提年份，填即将到来的那一次（今年该日期未到则今年，已过则明年）。\n"
+        "7. trigger_time 由你完整推算；字符串格式见上文「用户消息」开头说明（可到月/日/时，不必强行写分秒）。\n"
+        "   **必须以【对话语境参考时间】为基准**换算相对时间（「几分钟后」= 参考时刻 + 若干分钟，写出结果时刻）。\n"
+        "   对照【服务器当前时间】核对是否合理，禁止凭空年份。\n"
+        "   绝对日期：用户说「今年 6 月 15 日」须用参考时间所在自然年；未提年份时用「即将到来」的那一次日期。\n"
         "8. trigger_content 填写「情景详细描述」：客观记录当时约定的时间点、事件、用户情绪与关键事实（若干句），"
         "用于系统在**触发当日**再结合该轮对话记录当场生成最终关怀话术；**不要**写成已经对用户念出口的台词式问候。"
         "描述须与人设、长期记忆摘要及瞬时记忆一致，勿编造矛盾事实。\n\n"
-        '只输出一个 JSON 对象，格式严格为：{"reminders":[{"trigger_type":"...",'
-        '"trigger_time":"...","trigger_content":"..."}]} ；其中 trigger_content 为情景详细描述；'
-        '也可使用键名 scenario_detail 代替 trigger_content ，二者等价。\n不要其它文字。'
+        '只输出一个 JSON 对象，格式严格为：{"reminders":[{"trigger_type":"...","trigger_time":"...","trigger_content":"..."}]} ；其中 trigger_content 为情景详细描述；'
     )
     prefix = (context_prefix or "").strip()
     dialogue = f"【本轮对话】\n【用户】\n{user_input}\n\n【助手】\n{ai_reply}"
-    user_block = f"{prefix}\n\n{dialogue}" if prefix else dialogue
+    user_block = ref_line + (f"{prefix}\n\n{dialogue}" if prefix else dialogue)
     opts: dict[str, Any] = {"num_predict": 2048, "temperature": 0.05, "format": "json"}
     cli = _ollama_client()
     model = _model_name()
@@ -366,12 +535,13 @@ def _call_extract_llm(
             logger.warning("关怀抽取 LLM 重试失败: %s", e2)
             return None
     raw = _ollama_message_content(r)
-    parsed = _extract_json_blob(raw)
+    parsed = _parse_llm_reminder_json(raw)
     if parsed is not None:
         return parsed
 
     tail = (raw or "").strip()
     if not tail:
+        logger.debug("关怀抽取模型返回空正文 model=%s", model)
         return None
 
     logger.debug(
@@ -393,7 +563,7 @@ def _call_extract_llm(
                         "你的上一段输出无法被标准 JSON 解析。"
                         "请只输出一个 JSON 对象，不要 markdown、不要中文解释。"
                         '格式：{"reminders":[]}；多条时数组内每项含 trigger_type、trigger_time、'
-                        "trigger_content（或 scenario_detail）。字符串内双引号必须转义为 \\\" 。"
+                        "trigger_content。字符串内双引号必须转义为 \\\" 。"
                     ),
                 },
             ],
@@ -403,13 +573,14 @@ def _call_extract_llm(
         logger.warning("关怀抽取纠错轮调用失败: %s", e)
     else:
         raw2 = _ollama_message_content(r2)
-        parsed = _extract_json_blob(raw2)
+        parsed = _parse_llm_reminder_json(raw2)
         if parsed is not None:
             return parsed
 
     logger.info(
-        "关怀抽取解析失败 model=%s raw_prefix=%s",
+        "关怀抽取解析失败 model=%s raw_len=%s raw_prefix=%s",
         model,
+        len(tail),
         tail[:480].replace("\r", " ").replace("\n", "\\n"),
     )
     return None
@@ -422,6 +593,7 @@ def extract_and_persist_reminders(
     *,
     package_key: str | None = None,
     session_id: int | None = None,
+    scene_time: str | None = None,
 ) -> int:
     """同步：调用抽取模型并插入 ``remind_trigger``；返回新增条数。
 
@@ -444,7 +616,17 @@ def extract_and_persist_reminders(
     pkg_norm, period_overview = _long_memory_overview_for_package(user_id, package_key)
     context_prefix = _build_remind_extract_context(user_id, pkg_norm, period_overview)
 
-    obj = _call_extract_llm(ui, ar, context_prefix=context_prefix)
+    server_now = datetime.now()
+    parsed_scene = _parse_scene_time_string(scene_time)
+    ref_now = parsed_scene if parsed_scene is not None else server_now
+
+    obj = _call_extract_llm(
+        ui,
+        ar,
+        context_prefix=context_prefix,
+        reference_now=ref_now,
+        server_now=server_now,
+    )
     if not obj:
         logger.info(
             "关怀抽取无结果：LLM 返回不可解析或非 JSON user_id=%s model=%s",
@@ -479,7 +661,6 @@ def extract_and_persist_reminders(
             pkg_norm,
         )
 
-    now = datetime.now()
     inserted = 0
     skipped_parse = 0
     skipped_past = 0
@@ -487,17 +668,27 @@ def extract_and_persist_reminders(
     for it in items[:_MAX_REMINDERS_PER_TURN]:
         if not isinstance(it, dict):
             continue
-        tt = _normalize_trigger_type(it.get("trigger_type"))
+        raw_type = it.get("trigger_type")
+        tt = _normalize_trigger_type(raw_type)
         if not tt:
-            skipped_type += 1
-            continue
+            raw_s = str(raw_type or "").strip()
+            if raw_s:
+                tt = "日常关怀"
+                logger.info(
+                    "关怀抽取：trigger_type 无法归入四类，已降级为「日常关怀」入库 raw=%r",
+                    raw_type,
+                )
+            else:
+                skipped_type += 1
+                logger.debug("关怀抽取跳过：trigger_type 为空")
+                continue
         dt_raw = _parse_trigger_time(str(it.get("trigger_time") or ""))
         if dt_raw is None:
             skipped_parse += 1
             logger.debug("关怀抽取跳过：无法解析时间 %r", it.get("trigger_time"))
             continue
-        dt = _roll_trigger_time_to_future(dt_raw, now)
-        if dt < now - _SKEW:
+        dt = _roll_trigger_time_to_future(dt_raw, server_now)
+        if dt < server_now - _SKEW:
             skipped_past += 1
             logger.debug("关怀抽取跳过：顺延后仍早于当前 %s", dt)
             continue

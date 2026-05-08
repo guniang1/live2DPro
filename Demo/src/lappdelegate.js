@@ -356,6 +356,13 @@ export class LAppDelegate {
     }
   }
 
+  /** @param {string} fullUrl */
+  applyBackgroundFullUrl(fullUrl) {
+    for (let i = 0; i < this._subdelegates.getSize(); i++) {
+      this._subdelegates.at(i).getView().applyBackgroundFullUrl(fullUrl);
+    }
+  }
+
   /** 切换到 ModelDir 中的下一个模型（与原先画布齿轮按钮行为一致） */
   nextModel() {
     for (let i = 0; i < this._subdelegates.getSize(); i++) {

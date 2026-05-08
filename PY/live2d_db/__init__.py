@@ -7,7 +7,6 @@ from .entities import (
     LongMemory,
     Persona,
     RemindTrigger,
-    SystemConfig,
     User,
     UserProfile,
 )
@@ -18,7 +17,6 @@ from .repositories import (
     LongMemoryRepository,
     PersonaRepository,
     RemindTriggerRepository,
-    SystemConfigRepository,
     UserProfileRepository,
     UserRepository,
 )
@@ -33,7 +31,6 @@ __all__ = [
     "UserProfile",
     "RemindTrigger",
     "Live2dModelAsset",
-    "SystemConfig",
     "get_connection",
     "connection_ctx",
     "UserRepository",
@@ -43,7 +40,6 @@ __all__ = [
     "UserProfileRepository",
     "RemindTriggerRepository",
     "Live2dModelAssetRepository",
-    "SystemConfigRepository",
     "execute_sql_file",
     "fetch_all",
     "init_database_from_package_schema",

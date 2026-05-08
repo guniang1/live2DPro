@@ -17,21 +17,33 @@ import AudioRecorder from './utils/AudioRecorder.js';
 import SpeechRecognition from './utils/SpeechRecognition.js';
 import {
     appendChatMessage,
+    prependChatHistoryRows,
     reconnectChatWebSocketsForNewPackage,
     renderChatHistoryRows,
     sendChatMessage,
 } from './api/ws.js';
 import { fetchChatSessionsForPanel } from './api/chatSessions.js';
+import { triggerLongMemoryConsolidateNow } from './api/longMemory.js';
+import { triggerRemindScanNow } from './api/remindTriggers.js';
 import { getLive2dPackage, getUserId, setLive2dPackage, setUserId } from './api/wsConfig.js';
 import { getAssetDownloadUrl, getModelAssets, getModelPackages } from './api/assetUpload.js';
 import {
     applyOptionalSharedDownloadProxy,
     looksLikePresignedStorageUrl,
 } from './api/storageFetchUrl.js';
+import { fetchRandomBackgroundImage } from './api/backgroundImages.js';
 
-/** 从 DB 拉取当前用户 + 当前模型包 的近期 chat_session（不按浏览器 session 过滤，避免与库里旧 session_key 对不上而一直空白） */
-async function refreshChatHistoryFromServer() {
-    const headerEl = document.getElementById('chat-header');
+/** 左侧历史与 GET /chat-sessions 对齐：每页会话轮次数（user+ai 算一行 chat_session） */
+const CHAT_HISTORY_PAGE_SIZE = 50;
+
+let chatHistoryLoadGeneration = 0;
+let chatHistoryNextPage = 2;
+let chatHistoryLoadedRounds = 0;
+let chatHistoryHasMoreOlder = true;
+let chatHistoryOlderLoading = false;
+let chatHistoryPagingReady = false;
+
+function resolveChatHistoryUserId() {
     const raw = localStorage.getItem('live2d_info');
     let auth = null;
     try {
@@ -41,6 +53,115 @@ async function refreshChatHistoryFromServer() {
     }
     const uid = auth?.user_id != null ? Number(auth.user_id) : getUserId();
     if (!uid || !Number.isInteger(uid) || uid <= 0) {
+        return null;
+    }
+    return uid;
+}
+
+function formatChatHistoryHeader(loadedRounds, hasMoreOlder) {
+    if (loadedRounds <= 0) {
+        return '和 Ta 聊聊天（还没有旧记录，先说一句吧）';
+    }
+    const tail = hasMoreOlder ? ' · 上滑加载更早' : '';
+    return `和 Ta 聊聊天（已接上 ${loadedRounds} 轮回忆${tail}）`;
+}
+
+async function loadOlderChatHistoryPage() {
+    if (
+        !chatHistoryPagingReady ||
+        !chatHistoryHasMoreOlder ||
+        chatHistoryOlderLoading
+    ) {
+        return;
+    }
+    const uid = resolveChatHistoryUserId();
+    if (!uid) {
+        return;
+    }
+    chatHistoryOlderLoading = true;
+    const gen = chatHistoryLoadGeneration;
+    const list = document.getElementById('chat-list');
+    const headerEl = document.getElementById('chat-header');
+    try {
+        const rows = await fetchChatSessionsForPanel({
+            userId: uid,
+            packageKey: getLive2dPackage(),
+            page: chatHistoryNextPage,
+            size: CHAT_HISTORY_PAGE_SIZE,
+        });
+        if (gen !== chatHistoryLoadGeneration) {
+            return;
+        }
+        if (!Array.isArray(rows) || rows.length === 0) {
+            chatHistoryHasMoreOlder = false;
+            if (headerEl) {
+                headerEl.textContent = formatChatHistoryHeader(
+                    chatHistoryLoadedRounds,
+                    false
+                );
+            }
+            return;
+        }
+        const ordered = [...rows].reverse();
+        if (!list) {
+            return;
+        }
+        const prevScrollHeight = list.scrollHeight;
+        const prevScrollTop = list.scrollTop;
+        prependChatHistoryRows(ordered);
+        const prevBehavior = list.style.scrollBehavior;
+        list.style.scrollBehavior = 'auto';
+        list.scrollTop = prevScrollTop + (list.scrollHeight - prevScrollHeight);
+        list.style.scrollBehavior = prevBehavior;
+
+        chatHistoryLoadedRounds += rows.length;
+        chatHistoryNextPage += 1;
+        chatHistoryHasMoreOlder = rows.length >= CHAT_HISTORY_PAGE_SIZE;
+        if (headerEl) {
+            headerEl.textContent = formatChatHistoryHeader(
+                chatHistoryLoadedRounds,
+                chatHistoryHasMoreOlder
+            );
+        }
+    } catch (e) {
+        console.warn('加载更早对话失败', e);
+    } finally {
+        if (gen === chatHistoryLoadGeneration) {
+            chatHistoryOlderLoading = false;
+        }
+    }
+}
+
+function setupChatHistoryScrollPagingOnce() {
+    const list = document.getElementById('chat-list');
+    if (!list || list.dataset.historyScrollBound === '1') {
+        return;
+    }
+    list.dataset.historyScrollBound = '1';
+    list.addEventListener(
+        'scroll',
+        () => {
+            if (list.scrollTop > 80) {
+                return;
+            }
+            void loadOlderChatHistoryPage();
+        },
+        { passive: true }
+    );
+}
+
+/** 从 DB 拉取当前用户 + 当前模型包 的近期 chat_session（不按浏览器 session 过滤，避免与库里旧 session_key 对不上而一直空白）。默认仅最新一页，上滑再拉更早页。 */
+async function refreshChatHistoryFromServer() {
+    const gen = ++chatHistoryLoadGeneration;
+    chatHistoryPagingReady = false;
+    chatHistoryOlderLoading = false;
+    chatHistoryNextPage = 2;
+    chatHistoryLoadedRounds = 0;
+    chatHistoryHasMoreOlder = true;
+
+    const headerEl = document.getElementById('chat-header');
+    const uid = resolveChatHistoryUserId();
+    if (!uid) {
         return;
     }
     const prevHeader = headerEl ? headerEl.textContent : '';
@@ -51,18 +172,31 @@ async function refreshChatHistoryFromServer() {
         const rows = await fetchChatSessionsForPanel({
             userId: uid,
             packageKey: getLive2dPackage(),
-            limit: 200,
+            page: 1,
+            size: CHAT_HISTORY_PAGE_SIZE,
         });
-        // 接口按 create_time DESC；面板从下往上堆叠习惯为旧在上，故反转为时间正序
+        if (gen !== chatHistoryLoadGeneration) {
+            return;
+        }
+        // 接口按 create_time DESC；面板旧在上新在下，故反转为时间正序
         const ordered = Array.isArray(rows) ? [...rows].reverse() : [];
         renderChatHistoryRows(ordered);
+        chatHistoryLoadedRounds = rows.length;
+        chatHistoryNextPage = 2;
+        chatHistoryHasMoreOlder = rows.length >= CHAT_HISTORY_PAGE_SIZE;
+        chatHistoryPagingReady = true;
         if (headerEl) {
-            const n = ordered.length;
-            headerEl.textContent =
-                n > 0 ? `和 Ta 聊聊天（已接上 ${n} 条回忆）` : '和 Ta 聊聊天（还没有旧记录，先说一句吧）';
+            headerEl.textContent = formatChatHistoryHeader(
+                ordered.length,
+                chatHistoryHasMoreOlder
+            );
         }
     } catch (e) {
         console.warn('加载历史对话失败', e);
+        if (gen !== chatHistoryLoadGeneration) {
+            return;
+        }
+        chatHistoryPagingReady = false;
         if (headerEl) {
             headerEl.textContent = prevHeader || '和 Ta 聊聊天';
         }
@@ -78,7 +212,31 @@ async function refreshChatHistoryFromServer() {
     }
 }
 
+function stemFromBackgroundRel(rel) {
+    const s = String(rel || '').replace(/\\/g, '/');
+    const base = s.split('/').filter(Boolean).pop() || s;
+    const dot = base.lastIndexOf('.');
+    return dot > 0 ? base.slice(0, dot) : base;
+}
+
 async function ensureBackgroundCycleList() {
+    try {
+        const row = await fetchRandomBackgroundImage({ expiresIn: 86400 });
+        const url = String(row.url || '').trim();
+        if (url) {
+            LAppDefine.backgroundCycle.paths = [url];
+            LAppDefine.backgroundCycle.remoteRandom = true;
+            LAppDefine.backgroundCycle.displayName = String(row.name || '');
+            console.log('从后端加载随机背景:', row.name);
+            return;
+        }
+    } catch (e) {
+        console.warn('后端随机背景不可用，回退本地 background_order.json', e);
+    }
+
+    LAppDefine.backgroundCycle.remoteRandom = false;
+    LAppDefine.backgroundCycle.displayName = '';
+
     try {
         const res = await fetch(
             `${LAppDefine.ResourcesPath}background/background_order.json`
@@ -102,6 +260,15 @@ async function ensureBackgroundCycleList() {
         LAppDefine.backgroundCycle.paths = [
             ...LAppDefine.BackgroundCyclePathsFallback
         ];
+    }
+    if (
+        !LAppDefine.backgroundCycle.remoteRandom &&
+        LAppDefine.backgroundCycle.paths?.length
+    ) {
+        const first = LAppDefine.backgroundCycle.paths[0];
+        if (first && !String(first).startsWith('http')) {
+            LAppDefine.backgroundCycle.displayName = stemFromBackgroundRel(first);
+        }
     }
 }
 
@@ -283,6 +450,7 @@ window.addEventListener(
         const currentModelLabel = LAppDelegate.getInstance().getCurrentModelLabel();
         setLive2dPackage(currentModelLabel);
         reconnectChatWebSocketsForNewPackage();
+        setupChatHistoryScrollPagingOnce();
         void refreshChatHistoryFromServer();
 
         updateBackgroundStatusLabel();
@@ -301,7 +469,29 @@ window.addEventListener(
 
         const bgNextBtn = document.getElementById('bg-next-btn');
         if (bgNextBtn) {
-            bgNextBtn.addEventListener('click', () => {
+            bgNextBtn.addEventListener('click', async () => {
+                if (LAppDefine.backgroundCycle.remoteRandom) {
+                    bgNextBtn.disabled = true;
+                    try {
+                        const row = await fetchRandomBackgroundImage({
+                            expiresIn: 86400,
+                        });
+                        const url = String(row.url || '').trim();
+                        if (url) {
+                            LAppDefine.backgroundCycle.paths = [url];
+                            LAppDefine.backgroundCycle.displayName = String(
+                                row.name || ''
+                            );
+                            LAppDelegate.getInstance().applyBackgroundFullUrl(url);
+                        }
+                    } catch (e) {
+                        console.warn('切换随机背景失败', e);
+                    } finally {
+                        bgNextBtn.disabled = false;
+                        updateBackgroundStatusLabel();
+                    }
+                    return;
+                }
                 LAppDelegate.getInstance().cycleBackground();
                 updateBackgroundStatusLabel();
             });
@@ -325,6 +515,125 @@ window.addEventListener(
         if (uploadCharacterBtn) {
             uploadCharacterBtn.addEventListener('click', () => {
                 location.href = '/src/pages/characterDef.html';
+            });
+        }
+
+        const longMemoryBtn = document.getElementById('long-memory-consolidate-btn');
+        let longMemoryConsolidateResetTimer = null;
+        if (longMemoryBtn) {
+            longMemoryBtn.addEventListener('click', async () => {
+                const defaultLabel =
+                    longMemoryBtn.getAttribute('data-default-label')?.trim() ||
+                    longMemoryBtn.textContent.trim() ||
+                    '总结长期记忆';
+
+                let uid = getUserId();
+                try {
+                    const rawAuth = localStorage.getItem('live2d_info');
+                    const la = rawAuth ? JSON.parse(rawAuth) : null;
+                    if (la?.user_id != null) {
+                        uid = Number(la.user_id);
+                    }
+                } catch (_) {
+                    /* ignore */
+                }
+                if (!uid || !Number.isInteger(uid) || uid < 1) {
+                    alert('请先登录后再总结长期记忆。');
+                    return;
+                }
+
+                if (longMemoryConsolidateResetTimer) {
+                    clearTimeout(longMemoryConsolidateResetTimer);
+                    longMemoryConsolidateResetTimer = null;
+                }
+
+                longMemoryBtn.disabled = true;
+                longMemoryBtn.setAttribute('aria-busy', 'true');
+                longMemoryBtn.textContent = '总结中…';
+
+                try {
+                    const data = await triggerLongMemoryConsolidateNow({
+                        userId: uid,
+                        packageKey: getLive2dPackage(),
+                    });
+                    console.info('[long-memory consolidate-now]', data);
+                    longMemoryBtn.textContent = data.updated
+                        ? '已更新摘要'
+                        : '暂无可总结';
+                    longMemoryConsolidateResetTimer = setTimeout(() => {
+                        longMemoryBtn.textContent = defaultLabel;
+                        longMemoryBtn.disabled = false;
+                        longMemoryBtn.removeAttribute('aria-busy');
+                        longMemoryConsolidateResetTimer = null;
+                    }, 3600);
+                } catch (e) {
+                    longMemoryBtn.textContent = defaultLabel;
+                    longMemoryBtn.disabled = false;
+                    longMemoryBtn.removeAttribute('aria-busy');
+                    alert(
+                        e && e.message
+                            ? String(e.message)
+                            : '触发长期记忆总结失败，请确认后端与 Ollama 可用。'
+                    );
+                }
+            });
+        }
+
+        const remindScanBtn = document.getElementById('remind-scan-now-btn');
+        const remindScanLabelEl = remindScanBtn?.querySelector('.toolbar-btn-care__label');
+        let remindScanResetTimer = null;
+
+        function setRemindScanBtnLabel(text) {
+            if (remindScanLabelEl) {
+                remindScanLabelEl.textContent = text;
+            } else if (remindScanBtn) {
+                remindScanBtn.textContent = text;
+            }
+        }
+
+        if (remindScanBtn) {
+            remindScanBtn.addEventListener('click', async () => {
+                const defaultLabel =
+                    remindScanBtn.getAttribute('data-default-label')?.trim() ||
+                    remindScanLabelEl?.textContent?.trim() ||
+                    '立即扫描到期项';
+
+                if (remindScanResetTimer) {
+                    clearTimeout(remindScanResetTimer);
+                    remindScanResetTimer = null;
+                }
+
+                remindScanBtn.disabled = true;
+                remindScanBtn.setAttribute('aria-busy', 'true');
+                setRemindScanBtnLabel('扫描中…');
+
+                try {
+                    const data = await triggerRemindScanNow();
+                    const pf = Number(data.pending_fetched) || 0;
+                    const dv = Number(data.delivered) || 0;
+                    const rel = Number(data.released_no_ws) || 0;
+                    console.info('[remind scan-now]', data);
+                    setRemindScanBtnLabel(
+                        pf === 0 && dv === 0
+                            ? '无到期待扫'
+                            : `待取 ${pf} · 已推送 ${dv}${rel ? ` · 离线 ${rel}` : ''}`
+                    );
+                    remindScanResetTimer = setTimeout(() => {
+                        setRemindScanBtnLabel(defaultLabel);
+                        remindScanBtn.disabled = false;
+                        remindScanBtn.removeAttribute('aria-busy');
+                        remindScanResetTimer = null;
+                    }, 3600);
+                } catch (e) {
+                    setRemindScanBtnLabel(defaultLabel);
+                    remindScanBtn.disabled = false;
+                    remindScanBtn.removeAttribute('aria-busy');
+                    alert(
+                        e && e.message
+                            ? String(e.message)
+                            : '关怀扫描请求失败，请确认后端可用。'
+                    );
+                }
             });
         }
 

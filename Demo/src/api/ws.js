@@ -1,4 +1,5 @@
 // /ws/chat：用户发 message；收 JSON 流式内容，并在「有音色参考」时同连接收 chunk_audio 元数据 + 对应二进制 WAV
+import * as LAppDefine from "../lappdefine.js";
 import { getChatWsUrl } from "./wsConfig.js";
 import {
     applyChatLive2dActions,
@@ -151,14 +152,24 @@ function getChatList() {
     return document.getElementById("chat-list");
 }
 
+/**
+ * @param {"user"|"ai"|"remind"} role
+ * @param {string} text
+ */
+function createChatBubbleElement(role, text) {
+    const item = document.createElement("div");
+    const bubble =
+        role === "user" ? "user" : role === "remind" ? "remind" : "ai";
+    item.className = `chat-item ${bubble}`;
+    item.textContent = text;
+    return item;
+}
+
 export function appendChatMessage(role, text) {
     const list = getChatList();
     if (!list || !text) return;
 
-    const item = document.createElement("div");
-    item.className = `chat-item ${role === "user" ? "user" : "ai"}`;
-    item.textContent = text;
-    list.appendChild(item);
+    list.appendChild(createChatBubbleElement(role, text));
     list.scrollTop = list.scrollHeight;
 }
 
@@ -176,12 +187,36 @@ export function renderChatHistoryRows(rows) {
     clearChatList();
     const list = getChatList();
     if (!list || !Array.isArray(rows)) return;
+    const frag = document.createDocumentFragment();
     for (const row of rows) {
         const u = String(row.user_input || "").trim();
         const a = String(row.ai_reply || "").trim();
-        if (u) appendChatMessage("user", u);
-        if (a) appendChatMessage("ai", a);
+        if (u) frag.appendChild(createChatBubbleElement("user", u));
+        if (a) frag.appendChild(createChatBubbleElement("ai", a));
     }
+    list.appendChild(frag);
+    const prevBehavior = list.style.scrollBehavior;
+    list.style.scrollBehavior = "auto";
+    list.scrollTop = list.scrollHeight;
+    list.style.scrollBehavior = prevBehavior;
+}
+
+/**
+ * 将更早的一页会话插到列表顶部（调用方负责恢复 scrollTop，避免跳动）。
+ * rows 须已是时间正序（与 renderChatHistoryRows 一致）。
+ * @param {Array<{ user_input?: string, ai_reply?: string }>} rows
+ */
+export function prependChatHistoryRows(rows) {
+    const list = getChatList();
+    if (!list || !Array.isArray(rows) || rows.length === 0) return;
+    const frag = document.createDocumentFragment();
+    for (const row of rows) {
+        const u = String(row.user_input || "").trim();
+        const a = String(row.ai_reply || "").trim();
+        if (u) frag.appendChild(createChatBubbleElement("user", u));
+        if (a) frag.appendChild(createChatBubbleElement("ai", a));
+    }
+    list.insertBefore(frag, list.firstChild);
 }
 
 function scheduleClearOutput() {
@@ -476,6 +511,12 @@ function handleTextChatIncoming(event) {
             expression: data.expression,
             motion: data.motion
         });
+    } else if (data.type === "remind_trigger") {
+        const scene = String(data.trigger_type || "提醒").trim();
+        const body = String(data.delivery_message ?? "").trim();
+        const line = body ? `【${scene}】${body}` : `【${scene}】`;
+        appendChatMessage("remind", line);
+        console.info("[remind_trigger]", data.trigger_id, scene);
     } else if (data.type === "done") {
         pendingAudioMeta = null;
         console.log("回复完成（文本与音频帧已结束）");
@@ -558,7 +599,7 @@ function wireTextSocket(ws, url, label) {
             pendingUserMessageAfterReconnect = null;
             resetStreamingState();
             try {
-                ws.send(JSON.stringify({ message }));
+                ws.send(JSON.stringify(buildChatWsPayload(message)));
                 isAwaitingAiReply = true;
                 console.info("已打断上一轮并发送新消息");
             } catch (e) {
@@ -619,6 +660,38 @@ export function reconnectChatWebSocketsForNewPackage() {
     connectText();
 }
 
+function formatUserWorldTimeForChat() {
+    try {
+        return new Date().toLocaleString("zh-CN", {
+            weekday: "short",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+        });
+    } catch {
+        return new Date().toISOString();
+    }
+}
+
+function buildChatWsPayload(text) {
+    const scene_location = String(
+        LAppDefine.backgroundCycle.displayName || ""
+    ).trim();
+    const scene_time = formatUserWorldTimeForChat();
+    const payload = { message: text };
+    if (scene_location) {
+        payload.scene_location = scene_location;
+    }
+    if (scene_time) {
+        payload.scene_time = scene_time;
+    }
+    return payload;
+}
+
 function resetStreamingState() {
     if (clearOutputTimerId) {
         clearTimeout(clearOutputTimerId);
@@ -677,7 +750,7 @@ export function sendChatMessage(message) {
     }
     try {
         resetStreamingState();
-        textSocket.send(JSON.stringify({ message: text }));
+        textSocket.send(JSON.stringify(buildChatWsPayload(text)));
         isAwaitingAiReply = true;
         return true;
     } catch (e) {

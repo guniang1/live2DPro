@@ -66,7 +66,11 @@ class Live2dCatalog:
 
     @property
     def action_llm_system_text(self) -> str:
-        """专用于「动作/表情决策」模型（与聊天模型分离），要求只输出 JSON。"""
+        """专用于「动作/表情决策」模型（与聊天模型分离），要求只输出 JSON。
+
+        与 wschat._action_llm_user_content_sync 配合：规则侧强调为 Live2D 虚拟角色选型，
+        expression/motion 表示角色演绎资源，非真人用户。
+        """
         exn, mon = self.expression_names, self.motion_names
         if exn and mon:
             sample_line = json.dumps(

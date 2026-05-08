@@ -1,14 +1,13 @@
 """
 Live2D 数字人业务库 HTTP 接口（无鉴权，生产环境请加认证与限流）。
 
-推荐暴露范围（8 张表全开，与毕业设计文档一致）：
+推荐暴露范围（核心业务表全开，与毕业设计文档一致）：
 - user：注册与资料维护（响应永不返回 password）
 - chat_session：对话落库与按用户查询
 - long_memory：长期记忆 CRUD
 - persona：人设列表与后台维护
 - user_profile：画像（按 user  upsert）
 - remind_trigger：主动关怀/待办
-- system_config：可调参数（避免硬编码）
 - live2d_model_asset：Demo 下 Resources/<包名> 内模型/动作/表情等文件索引
 - background_image：背景图索引（MinIO URL）；GET /background-images/random 每次随机一行
 - persona：人设（全局模板；user_id+package_key 非空时为某用户某模型包专属，character_desc 写入聊天 system）；支持 ``expand_with_llm`` / ``POST /personas/expand-from-hints`` 由 Ollama 据简短关键词扩写角色与语气
@@ -49,7 +48,6 @@ from .entities import (
     LongMemory,
     Persona,
     RemindTrigger,
-    SystemConfig,
     User,
     UserProfile,
 )
@@ -82,10 +80,6 @@ from .http_schemas import (
     RemindTriggerPublic,
     RemindSchedulerScanNowPublic,
     RemindTriggerUpdate,
-    SystemConfigCreate,
-    SystemConfigPatchValue,
-    SystemConfigPublic,
-    SystemConfigUpdate,
     UserCreate,
     UserProfilePublic,
     UserProfileUpsert,
@@ -106,7 +100,6 @@ from .repositories import (
     LongMemoryRepository,
     PersonaRepository,
     RemindTriggerRepository,
-    SystemConfigRepository,
     UserProfileRepository,
     UserRepository,
 )
@@ -471,19 +464,9 @@ def _remind_pub(t: RemindTrigger) -> RemindTriggerPublic:
         trigger_time=t.trigger_time,
         session_id=t.session_id,
         trigger_content=t.trigger_content,
+        delivery_message=None,
         is_triggered=t.is_triggered,
         create_time=t.create_time,
-    )
-
-
-def _cfg_pub(c: SystemConfig) -> SystemConfigPublic:
-    assert c.config_id is not None
-    return SystemConfigPublic(
-        config_id=c.config_id,
-        config_key=c.config_key,
-        config_value=c.config_value,
-        config_desc=c.config_desc,
-        update_time=c.update_time,
     )
 
 
@@ -1168,78 +1151,6 @@ def remind_triggers_delete(trigger_id: int, db: Db) -> OkRows:
     n = RemindTriggerRepository.delete_by_id(db, trigger_id)
     if not n:
         raise HTTPException(status_code=404, detail="触发记录不存在")
-    return OkRows(affected_rows=n)
-
-
-# ----- system_config -----
-@router.post("/system-config", response_model=SystemConfigPublic)
-def system_config_create(body: SystemConfigCreate, db: Db) -> SystemConfigPublic:
-    c = SystemConfig(config_key=body.config_key, config_value=body.config_value, config_desc=body.config_desc)
-    cid = SystemConfigRepository.create(db, c)
-    got = SystemConfigRepository.get_by_id(db, cid)
-    assert got
-    return _cfg_pub(got)
-
-
-@router.get("/system-config", response_model=List[SystemConfigPublic])
-def system_config_list(db: Db) -> List[SystemConfigPublic]:
-    rows = SystemConfigRepository.list_all(db)
-    return [_cfg_pub(c) for c in rows]
-
-
-@router.get("/system-config/key/{config_key}", response_model=SystemConfigPublic)
-def system_config_get_by_key(config_key: str, db: Db) -> SystemConfigPublic:
-    c = SystemConfigRepository.get_by_key(db, config_key)
-    if not c:
-        raise HTTPException(status_code=404, detail="配置不存在")
-    return _cfg_pub(c)
-
-
-@router.put("/system-config/key/{config_key}", response_model=SystemConfigPublic)
-def system_config_patch_value(config_key: str, body: SystemConfigPatchValue, db: Db) -> SystemConfigPublic:
-    n = SystemConfigRepository.update_value(db, config_key, body.config_value)
-    if not n:
-        raise HTTPException(status_code=404, detail="配置不存在")
-    c = SystemConfigRepository.get_by_key(db, config_key)
-    assert c
-    return _cfg_pub(c)
-
-
-@router.get("/system-config/{config_id}", response_model=SystemConfigPublic)
-def system_config_get(config_id: int, db: Db) -> SystemConfigPublic:
-    c = SystemConfigRepository.get_by_id(db, config_id)
-    if not c:
-        raise HTTPException(status_code=404, detail="配置不存在")
-    return _cfg_pub(c)
-
-
-@router.put("/system-config/{config_id}", response_model=SystemConfigPublic)
-def system_config_update(config_id: int, body: SystemConfigUpdate, db: Db) -> SystemConfigPublic:
-    c = SystemConfigRepository.get_by_id(db, config_id)
-    if not c:
-        raise HTTPException(status_code=404, detail="配置不存在")
-    c.config_key = body.config_key
-    c.config_value = body.config_value
-    c.config_desc = body.config_desc
-    SystemConfigRepository.update(db, c)
-    got = SystemConfigRepository.get_by_id(db, config_id)
-    assert got
-    return _cfg_pub(got)
-
-
-@router.delete("/system-config/key/{config_key}", response_model=OkRows)
-def system_config_delete_by_key(config_key: str, db: Db) -> OkRows:
-    n = SystemConfigRepository.delete_by_key(db, config_key)
-    if not n:
-        raise HTTPException(status_code=404, detail="配置不存在")
-    return OkRows(affected_rows=n)
-
-
-@router.delete("/system-config/{config_id}", response_model=OkRows)
-def system_config_delete(config_id: int, db: Db) -> OkRows:
-    n = SystemConfigRepository.delete_by_id(db, config_id)
-    if not n:
-        raise HTTPException(status_code=404, detail="配置不存在")
     return OkRows(affected_rows=n)
 
 

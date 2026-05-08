@@ -218,7 +218,7 @@ class RemindTriggerCreate(BaseModel):
     )
     trigger_content: str = Field(
         ...,
-        description="创建时的情景详细描述；投递 WebSocket 时由服务端结合 session_id 召回语境后再生成最终话术",
+        description="创建时的情景详细描述；投递时由 LLM 结合本字段、Redis 瞬时多轮对话（不含短期层）等当场重写最终话术",
     )
     is_triggered: int = 0
 
@@ -245,7 +245,11 @@ class RemindTriggerPublic(BaseModel):
     session_id: Optional[int] = None
     trigger_content: str = Field(
         ...,
-        description="库内情景描述；实时推送中的台词见 WebSocket remind_trigger.trigger_content（为生成稿）",
+        description="情景详细描述（与 MySQL 列一致）；REST 与 WebSocket remind_trigger 帧中本字段语义相同",
+    )
+    delivery_message: Optional[str] = Field(
+        None,
+        description="仅 WebSocket 投递帧给出：当场生成的面向用户台词；REST 响应中为 null",
     )
     is_triggered: int
     create_time: Optional[datetime] = None
@@ -259,33 +263,6 @@ class RemindSchedulerScanNowPublic(BaseModel):
     claimed: int = 0
     delivered: int = 0
     released_no_ws: int = 0
-
-
-# ----- system_config -----
-class SystemConfigCreate(BaseModel):
-    config_key: str = Field(..., max_length=50)
-    config_value: str = Field(..., max_length=255)
-    config_desc: Optional[str] = Field(None, max_length=255)
-
-
-class SystemConfigUpdate(BaseModel):
-    config_key: str = Field(..., max_length=50)
-    config_value: str = Field(..., max_length=255)
-    config_desc: Optional[str] = Field(None, max_length=255)
-
-
-class SystemConfigPatchValue(BaseModel):
-    config_value: str = Field(..., max_length=255)
-
-
-class SystemConfigPublic(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    config_id: int
-    config_key: str
-    config_value: str
-    config_desc: Optional[str] = None
-    update_time: Optional[datetime] = None
 
 
 class OkRows(BaseModel):
