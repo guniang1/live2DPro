@@ -148,9 +148,16 @@ def _remind_trigger_ws_payload(t: RemindTrigger, *, display_content: str) -> dic
     }
 
 
-def _remind_trigger_use_mimo_tts() -> bool:
-    raw = os.getenv("REMIND_TRIGGER_USE_MIMO", "1")
-    return str(raw).strip().lower() not in ("0", "false", "no", "off")
+def _remind_trigger_use_tts() -> bool:
+    """是否在投递关怀话术后尝试朗读（遵循 ``TTS_PROVIDER``：MiMo 或 GPT-SoVITS）。
+
+    ``REMIND_TRIGGER_USE_TTS`` 优先；未设置时沿用 ``REMIND_TRIGGER_USE_MIMO``（兼容旧名）。
+    """
+    raw = (os.getenv("REMIND_TRIGGER_USE_TTS") or "").strip()
+    if raw:
+        return raw.lower() not in ("0", "false", "no", "off")
+    raw_m = os.getenv("REMIND_TRIGGER_USE_MIMO", "1")
+    return str(raw_m).strip().lower() not in ("0", "false", "no", "off")
 
 
 async def _deliver_remind_trigger_on_websocket(
@@ -158,23 +165,36 @@ async def _deliver_remind_trigger_on_websocket(
     user_id: int,
     t: RemindTrigger,
 ) -> bool:
-    """先按语境生成话术并下发 ``remind_trigger`` JSON；若 MiMo 可用则再下发 ``chunk_audio``（``remind_audio``）+ WAV。
+    """先按语境生成话术并下发 ``remind_trigger`` JSON；若已启用关怀 TTS 且合成成功，再下发 ``chunk_audio``（``remind_audio``）+ WAV。
 
     话术由 ``remind_delivery.generate_remind_delivery_message`` 综合库内情景、``session_id`` 单轮、
-    Redis **瞬时**多轮对话（当前包，不含短期压缩层）、人设与用户画像等经 LLM **当场重写**；MiMo 朗读该生成稿。
+    Redis **瞬时**多轮对话（当前包，不含短期压缩层）、人设与用户画像等经 LLM **当场重写**；
+    朗读与主对话同源：``TTS_PROVIDER=mimo`` 时走 MiMo，否则在 GPT-SoVITS 参考音频齐全时走本地合成。
     """
     pkg = _live2d_package_from_websocket(websocket)
     from utils.remind_delivery import generate_remind_delivery_message
 
+    if not (t.trigger_type or "").strip():
+        logger.info(
+            "定时关怀跳过推送：trigger_type 为空 trigger_id=%s user_id=%s（自认领成功，不下发帧）",
+            t.trigger_id,
+            user_id,
+        )
+        return True
     display_line = await asyncio.to_thread(generate_remind_delivery_message, t, pkg)
+    if not (display_line or "").strip():
+        logger.info(
+            "定时关怀跳过推送：生成正文为空 trigger_id=%s user_id=%s（自认领成功，不下发帧）",
+            t.trigger_id,
+            user_id,
+        )
+        return True
     if not await _try_send_json(
         websocket, _remind_trigger_ws_payload(t, display_content=display_line)
     ):
         return False
 
-    if not _remind_trigger_use_mimo_tts():
-        return True
-    if normalized_tts_provider() != "mimo" or not mimo_tts_configured():
+    if not _remind_trigger_use_tts():
         return True
 
     text = (display_line or "").strip()
@@ -183,34 +203,70 @@ async def _deliver_remind_trigger_on_websocket(
 
     refer = await asyncio.to_thread(_load_tts_refer_runtime, user_id, pkg)
     wav: bytes = b""
+    provider = ""
     try:
-        _inc_dir = _mimo_ws_include_director_enabled()
-        mimo_director_user_prompt = ""
-        if _inc_dir:
-            mimo_director_user_prompt = await asyncio.to_thread(
-                _mimo_director_user_prompt_sync,
-                user_id,
-                pkg,
-                "",
-            )
         tts_lang = os.getenv("TTS_TEXT_LANGUAGE", "zh")
-        wav = await asyncio.to_thread(
-            mimo_tts,
-            text,
-            text_language=tts_lang,
-            refer_runtime=refer,
-            user_director_prompt=mimo_director_user_prompt or None,
-            speech_assistant_only=not _inc_dir,
-            merge_env_user_prompts=not _inc_dir,
-        )
+        provider = normalized_tts_provider()
+
+        if provider == "mimo" and mimo_tts_configured():
+            _inc_dir = _mimo_ws_include_director_enabled()
+            mimo_director_user_prompt = ""
+            if _inc_dir:
+                mimo_director_user_prompt = await asyncio.to_thread(
+                    _mimo_director_user_prompt_sync,
+                    user_id,
+                    pkg,
+                    "",
+                )
+            wav = await asyncio.to_thread(
+                mimo_tts,
+                text,
+                text_language=tts_lang,
+                refer_runtime=refer,
+                user_director_prompt=mimo_director_user_prompt or None,
+                speech_assistant_only=not _inc_dir,
+                merge_env_user_prompts=not _inc_dir,
+            )
+        elif provider == "gpt_sovits":
+            refer_ok = (
+                bool(refer)
+                and bool(refer.get("refer_wav_path"))
+                and bool(refer.get("prompt_text"))
+                and bool(refer.get("prompt_language"))
+            )
+            if refer_ok:
+                tts_speed = _tts_speed_default()
+                wav = await asyncio.to_thread(
+                    gpt_sovits_tts,
+                    text,
+                    text_language=tts_lang,
+                    speed=tts_speed,
+                    refer_wav_path=refer.get("refer_wav_path"),
+                    prompt_text=refer.get("prompt_text"),
+                    prompt_language=refer.get("prompt_language"),
+                )
+            else:
+                logger.info(
+                    "定时关怀跳过 GPT-SoVITS（参考音频不完整，与主对话一致须 refer+draft）"
+                    " trigger_id=%s user_id=%s package=%s",
+                    t.trigger_id,
+                    user_id,
+                    pkg,
+                )
+        elif provider == "mimo":
+            logger.debug(
+                "定时关怀跳过 MiMo（未配置 MIMO_API_KEY）trigger_id=%s",
+                t.trigger_id,
+            )
     except Exception:
         logger.exception(
-            "定时关怀 MiMo 合成失败 trigger_id=%s user_id=%s package=%s",
+            "定时关怀 TTS 合成失败 trigger_id=%s user_id=%s package=%s provider=%s",
             t.trigger_id,
             user_id,
             pkg,
+            provider or normalized_tts_provider(),
         )
-        return True
+        wav = b""
     finally:
         _cleanup_tts_refer_runtime(refer)
 
@@ -231,7 +287,7 @@ async def _deliver_remind_trigger_on_websocket(
 
 
 async def broadcast_remind_trigger_to_user(user_id: int, t: RemindTrigger) -> bool:
-    """向该用户所有在线聊天连接广播定时场景推送（含可选 MiMo 朗读）；无在线连接则返回 False。"""
+    """向该用户所有在线聊天连接广播定时场景推送（含可选 TTS 朗读）；无在线连接则返回 False。"""
     async with _session_lock:
         conns = list(_chat_ws_by_user.get(user_id, []))
     any_ok = False
@@ -616,7 +672,11 @@ def _chat_system_prompt() -> str:
         "OLLAMA_CHAT_OUTPUT_GUARD",
         "输出要求：只回复对用户有帮助的正文内容，不要输出“情绪：xxx”或任何情绪标签行，不要自报系统设定。",
     )
-    return f"{base}\n{guard}"
+    remind_preview_ban = (
+        "严禁预告「X分钟后我会对你说……」「我稍后会提醒你……」等说法；若要记录提醒，直接回复已记下即可，"
+        "不要描述自己将来的行为。"
+    )
+    return f"{base}\n{guard}\n{remind_preview_ban}"
 
 
 def _package_persona_chat_extra_sync(user_id: int, package_key: str) -> str:
@@ -1466,7 +1526,7 @@ WebSocket 聊天接口
     - 完成标记：{"type": "done"}
     - 错误信息：{"type": "error", "message": "错误描述"}
     - 定时场景（生日、纪念日、考试等）：``{"type":"remind_trigger","trigger_content":…,"delivery_message":…}``。
-      ``trigger_content`` 与 ``GET /api/remind-triggers`` **语义一致**，均为库内**情景详细描述**；``delivery_message`` 为投递当次 **LLM 重新撰写**的面向用户台词（输入含情景、``session_id`` 单轮、Redis **瞬时**多轮对话、人设与用户画像等）。随后若 MiMo 已配置且未关闭 ``REMIND_TRIGGER_USE_MIMO``，
+      ``trigger_content`` 与 ``GET /api/remind-triggers`` **语义一致**，均为库内**情景详细描述**；``delivery_message`` 为投递当次 **LLM 重新撰写**的面向用户台词（输入含情景、``session_id`` 单轮、Redis **瞬时**多轮对话、人设与用户画像等）。若未关闭 ``REMIND_TRIGGER_USE_TTS``（未设置时等价于未关闭 ``REMIND_TRIGGER_USE_MIMO``），且 ``TTS_PROVIDER`` 与参考音频/MiMo 配置允许合成成功，
       可再跟 ``chunk_audio``（``remind_audio``）+ WAV（朗读 ``delivery_message``）。
 
     可选遗留：``/ws/tts`` 仍可容纳连接，但默认前端已不再使用；朗读数据走 ``/ws/chat``。

@@ -1,6 +1,7 @@
 """从单轮对话（用户输入 + 助手回复）抽取定时关怀条目，写入 ``remind_trigger``。
 
 在 ``/ws/chat`` 每轮落库后由后台线程调用；可通过环境变量关闭或换模型。
+抽取 LLM 所见的「当前时刻」先取 **Unix 时间戳** 再换算为本机本地 **``年月日:时分秒``** 字符串（与相对时间换算表同一格式），再写入 User 消息文首，便于模型推算 ``trigger_time``。
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -38,6 +40,16 @@ _CONTENT_MAX = 4000
 _SKEW = timedelta(minutes=2)
 _REMIND_CTX_PERSONA_MAX = 3500
 _REMIND_CTX_INSTANT_MAX = 4500
+
+
+def _now_local_from_timestamp() -> datetime:
+    """当前时刻：取 Unix 时间戳再转为本机本地 naive datetime（秒精度），与调度到期判定一致。"""
+    return datetime.fromtimestamp(time.time()).replace(microsecond=0)
+
+
+def _format_datetime_for_extract_llm(dt: datetime) -> str:
+    """传给抽取 LLM 的公历时间：``年月日:时分秒``（例如 ``2026年05月09日:14:30:45``），便于模型对齐中文语境。"""
+    return dt.replace(microsecond=0).strftime("%Y年%m月%d日:%H:%M:%S")
 
 
 def _enabled() -> bool:
@@ -213,12 +225,65 @@ def _parse_scene_time_string(raw: str | None) -> datetime | None:
         return None
 
 
+def _resolve_relative_offsets(user_input: str, ref_now: datetime) -> str:
+    """扫描用户句中的相对时间表达，按参考时刻算出绝对时间，供注入抽取 prompt。
+
+    短时偏移（几分钟后等）由服务器计算，避免小模型分钟进位错误。
+    """
+    logger.debug(
+        "relative offsets: system_now=%s ref_now=%s",
+        _format_datetime_for_extract_llm(_now_local_from_timestamp()),
+        _format_datetime_for_extract_llm(ref_now),
+    )
+    hints: list[str] = []
+    ref = ref_now.replace(microsecond=0)
+    patterns = [
+        (r"(\d+)\s*分钟后", lambda m: ref + timedelta(minutes=int(m.group(1)))),
+        (r"(\d+)\s*小时后", lambda m: ref + timedelta(hours=int(m.group(1)))),
+        (r"半小时后", lambda m: ref + timedelta(minutes=30)),
+        (r"(\d+)\s*天后", lambda m: ref + timedelta(days=int(m.group(1)))),
+        (
+            r"明天",
+            lambda m: (ref + timedelta(days=1)).replace(
+                hour=9, minute=0, second=0, microsecond=0
+            ),
+        ),
+        (
+            r"后天",
+            lambda m: (ref + timedelta(days=2)).replace(
+                hour=9, minute=0, second=0, microsecond=0
+            ),
+        ),
+    ]
+    for pattern, calc in patterns:
+        for m in re.finditer(pattern, user_input):
+            try:
+                dt = calc(m).replace(microsecond=0)
+                hints.append(
+                    f"「{m.group(0)}」= {_format_datetime_for_extract_llm(dt)}（已由服务器换算，直接使用此值）"
+                )
+            except (ValueError, OverflowError):
+                pass
+    return "\n".join(hints)
+
+
+def _relative_minute_anchor(user_input: str, ref_now: datetime) -> datetime | None:
+    """用户句中「N 分钟后」对应的绝对时刻（与 :func:`_resolve_relative_offsets` 一致）。"""
+    m = re.search(r"(\d+)\s*分钟后", (user_input or "").strip())
+    if not m:
+        return None
+    try:
+        return ref_now.replace(microsecond=0) + timedelta(minutes=int(m.group(1)))
+    except (ValueError, OverflowError):
+        return None
+
+
 def _parse_trigger_time(raw: str) -> datetime | None:
     """解析模型输出的触发时刻；支持粗粒度（仅需年月、年月日、或到小时），缺失部分按规则补齐。
 
     - ``YYYY-MM`` → 该月 1 日 09:00:00
     - ``YYYY-MM-DD``（无时刻）→ 当日 09:00:00
-    - 有时刻仅到小时（如 ``2026-05-09T13``、``2026-05-09 13``）→ 该小时 00 分 00 秒
+    - 有时刻仅到小时（如 ``2026-05-09T13``、``2026-05-09 13``）→ 该小时 00 分 00 秒（**会丢失亚小时精度**；「几分钟后」类应依赖 ``_resolve_relative_offsets`` 注入的绝对时间）
     - 含分即可不带秒（解析后秒为 0）
     """
     s = (raw or "").strip()
@@ -382,17 +447,54 @@ def _build_remind_extract_context(
     return "\n\n".join(blocks).strip()
 
 
+def _clamp_model_year_to_reference(
+    dt: datetime, ref_now: datetime, user_input: str, ai_reply: str
+) -> datetime:
+    """小模型常在无「明年」依据时把月日写成下一公历年，导致永不触发；收回至参考年。"""
+    if dt.year <= ref_now.year:
+        return dt
+    blob = f"{user_input}\n{ai_reply}"
+    if any(k in blob for k in ("明年", "来年", "下一年", "后年")):
+        return dt
+    if "next year" in blob.casefold():
+        return dt
+    ys = str(dt.year)
+    if ys in blob:
+        return dt
+    try:
+        fixed = dt.replace(year=ref_now.year)
+    except ValueError:
+        return dt
+    logger.info(
+        "关怀抽取：trigger_time 年份超前且无依据，已按参考年纠正 %s → %s",
+        dt.isoformat(sep=" ", timespec="seconds"),
+        fixed.isoformat(sep=" ", timespec="seconds"),
+    )
+    return fixed
+
+
 def _roll_trigger_time_to_future(dt: datetime, now: datetime) -> datetime:
-    """抽取模型常把「6 月 15 日面试」写成去年或错误公历年；按同月同日同时刻滚到 ``now`` 之后的下一次。"""
+    """将早于当前的触发时刻滚到下一次合理未来时刻。
+
+    - 同一天内时刻偏早（多为模型压成整点）：抬到刚过扫描门槛，避免错误滚到下一年同日。
+    - 否则：递增公历年匹配「去年的月日」类输出。
+    """
     threshold = now - _SKEW
     if dt >= threshold:
         return dt
+    if dt.date() == now.date():
+        bumped = max(dt, threshold + timedelta(seconds=1)).replace(microsecond=0)
+        logger.info(
+            "关怀抽取：同日 trigger 早于当前，已顺延时刻 %s → %s",
+            dt.isoformat(sep=" ", timespec="seconds"),
+            bumped.isoformat(sep=" ", timespec="seconds"),
+        )
+        return bumped
     y0 = now.year
     for y in range(y0, y0 + 6):
         try:
             cand = dt.replace(year=y)
         except ValueError:
-            # 如 2 月 29 日落在非闰年
             continue
         if cand >= threshold:
             logger.info(
@@ -405,57 +507,38 @@ def _roll_trigger_time_to_future(dt: datetime, now: datetime) -> datetime:
 
 
 def _normalize_trigger_type(raw: object) -> str | None:
-    """将模型输出的 ``trigger_type`` 规范为四字枚举之一；无法识别时返回 ``None``（由上层决定是否降级）。"""
+    """将模型输出的 ``trigger_type`` 规范为四类之一。
+
+    **仅**接受与白名单一致的中文四字（可去空白后匹配），或少数完整英文等价词。
+    不属于四类、胡填、无法归类 → 返回 ``None``，上层**跳过入库**（等价于 trigger_type 为空、不启用本条关怀）。
+    """
     if raw is None:
         return None
     s = str(raw).strip()
     if not s:
         return None
-    if s in _ALLOWED_TYPES:
-        return s
-    # 全角拉丁字母 → 半角，便于匹配英文枚举
+    compact = re.sub(r"[\s\u3000]+", "", s)
+    if compact in _ALLOWED_TYPES:
+        return compact
+
     fw = "ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ"
     hw = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-    s_lat = s.translate(str.maketrans(fw, hw))
-    low = s_lat.casefold()
+    low = s.translate(str.maketrans(fw, hw)).casefold().strip()
+    parts = [p for p in re.split(r"[\s\u3000,_-]+", low) if p]
+    eng = re.sub(r"[\s\u3000_-]+", "", low)
+    exam_kw = frozenset({"exam", "test", "quiz", "midterm", "final", "interview"})
 
-    if "birthday" in low:
+    if parts == ["birthday"] or eng == "birthday":
         return "生日"
-    if "anniversary" in low:
+    if parts == ["anniversary"] or eng == "anniversary":
         return "纪念日"
-    if any(
-        k in low for k in ("exam", "quiz", "midterm", "final", "interview")
-    ):
-        return "考试"
-    if "测试" in s:
-        return "考试"
-
-    if "生日" in s or "生辰" in s or "诞辰" in s or "庆生" in s:
-        return "生日"
-    if "纪念日" in s or "周年" in s or "婚庆" in s:
-        return "纪念日"
-    if (
-        "考试" in s
-        or "考研" in s
-        or "期末" in s
-        or "高考" in s
-        or "面试" in s
-        or "答辩" in s
-        or "复试" in s
-        or "笔试" in s
-    ):
+    if exam_kw.intersection(parts) or eng in exam_kw:
         return "考试"
     if (
-        "关怀" in s
-        or "提醒" in s
-        or "问候" in s
-        or "祝福" in s
-        or "祝贺" in s
-        or "定时" in s
-        or "预约" in s
+        eng in ("dailycare", "routinecare", "dailyroutine")
+        or ("daily" in parts and "care" in parts)
+        or ("routine" in parts and "care" in parts)
     ):
-        return "日常关怀"
-    if any(k in low for k in ("daily", "reminder", "routine", "schedule")):
         return "日常关怀"
     return None
 
@@ -467,21 +550,46 @@ def _call_extract_llm(
     context_prefix: str = "",
     reference_now: datetime | None = None,
     server_now: datetime | None = None,
+    offset_hints: str = "",
 ) -> dict[str, Any] | None:
-    """``server_now`` 为运行进程本地系统时间（与调度扫描一致）；``reference_now`` 为相对语义基准（多为设备上报）。"""
-    srv = server_now if server_now is not None else datetime.now()
+    """``server_now`` 由 Unix 时间戳换算的本地时刻（与调度扫描一致）；``reference_now`` 为相对语义基准（多为设备上报）。"""
+    srv = server_now if server_now is not None else _now_local_from_timestamp()
     ref = reference_now if reference_now is not None else srv
-    ts_fmt = "%Y-%m-%d %H:%M:%S"
-    ref_line = (
-        f"【服务器当前时间（系统本地时间，后端判定到期与此对齐）】{srv.strftime(ts_fmt)}\n"
-        f"【对话语境参考时间】{ref.strftime(ts_fmt)}"
-        " —— 当前消息附带用户设备时间时已与之对齐；否则与服务器当前时间相同。\n"
-        "你必须**自行完成全部时刻推算**（不要用占位日期搪塞）。相对说法一律以【对话语境参考时间】为起点换算。"
-        "「明天」「后天」「下个月」等都要换算成具体公历日期。\n"
-        "trigger_time 写到对话里承诺的精度即可（后端会补齐缺失的分秒）："
-        "仅约定「某月」「某天」「某天上午/下午某时」时，可用 ``YYYY-MM``、``YYYY-MM-DD``、``YYYY-MM-DDTHH`` 等粗格式；"
+    oh = (offset_hints or "").strip()
+    hint_block = ""
+    if oh:
+        hint_block = (
+            "\n【相对时间换算结果（服务器已按【对话语境参考时间】计算，须直接使用，禁止自行重算或取整到整点）】\n"
+            f"{oh}\n"
+        )
+    if oh:
+        derive_part = (
+            "凡是上表中列出且与本条提醒对应的相对说法，trigger_time **必须**采用该行的绝对时间（含分秒）。"
+            "未列入表内的相对时刻仍须你根据【对话语境参考时间】自行推算（不要用占位日期搪塞）。"
+            "「下个月」等都要换算成具体公历日期。\n"
+        )
+    else:
+        derive_part = (
+            "你必须**自行完成全部时刻推算**（不要用占位日期搪塞）。相对说法一律以【对话语境参考时间】为起点换算。"
+            "「明天」「后天」「下个月」等都要换算成具体公历日期。\n"
+        )
+    short_offset_rule = (
         "若约定「几分钟后」「几小时后」等短时偏移，必须在参考时间上做完加减法，写出对应的具体日期时间（至少到分钟更稳妥，"
         "但若模型只愿给到整点也可接受 ``…THH``）。完整 ISO 亦可。\n"
+        if not oh
+        else "已列入换算表的短时偏移必须写出表内完整日期时间（至少到分钟，**禁止**只给到小时粒度）。"
+        "其余相对说法同上：至少到分钟。完整 ISO 亦可。\n"
+    )
+    ref_line = (
+        f"【服务器当前时间（Unix 时间戳换算为本机本地「年月日:时分秒」，后端判定到期与此对齐）】"
+        f"{_format_datetime_for_extract_llm(srv)}\n"
+        f"【对话语境参考时间（同上格式；附带用户设备 scene_time 时已解析对齐；否则与服务器当前时间相同）】"
+        f"{_format_datetime_for_extract_llm(ref)}\n"
+        f"{hint_block}"
+        f"{derive_part}"
+        "trigger_time 写到对话里承诺的精度即可（后端会补齐缺失的分秒）："
+        "仅约定「某月」「某天」「某天上午/下午某时」时，可用 ``YYYY-MM``、``YYYY-MM-DD``、``YYYY-MM-DDTHH`` 等粗格式；"
+        f"{short_offset_rule}"
         "公历年**默认与【对话语境参考时间】的自然年相同**；只有用户或助手明确说过「明年」「下一年」等才可顺延到下一年。\n"
         "禁止无依据写成参考年的下一年（例如参考为 2026 却写 2027）。\n\n"
     )
@@ -489,14 +597,17 @@ def _call_extract_llm(
         "你是信息抽取器。根据给定的一轮对话（用户与助手各一段），判断是否包含可以落实到具体日期或时间的"
         "将来事项，用于数字人稍后主动关怀。\n\n"
         "规则：\n"
-        "1. trigger_type 必须是以下四字之一：生日、纪念日、考试、日常关怀。\n"
+        "1. **trigger_type**（键名固定为 trigger_type，不要用 type/kind 代替）：仅当判断属于下面 **四类之一** 时才输出该条，"
+        "且值必须是 **生日、纪念日、考试、日常关怀** 四字原文之一（勿加空格或前后缀）。\n"
+        "   若判断该事项 **不属于** 以上四类（例如「加班 deadline」「去医院复查」但说不清归哪类），则 **整条不要写入 reminders**，"
+        "**禁止**输出 trigger_type 为空字符串或「其他」「待定」等占位项——服务端会将无法识别的类型一律视为 **不抽取**。\n"
         "2. 生日：明确提及生日日期（可按年重复）。\n"
         "3. 纪念日：恋爱、结婚、相识等重要纪念日。\n"
         "4. 考试：明确考试、面试、答辩等日期。\n"
         "5. 日常关怀：用户明确约定未来某日要做某事、需要被提醒或问候，且不属于以上三类。\n"
         "6. 若没有可信的具体日期/时间，或纯属泛泛闲聊、情绪倾诉而无日程，必须输出空列表。\n"
-        "7. trigger_time 由你完整推算；字符串格式见上文「用户消息」开头说明（可到月/日/时，不必强行写分秒）。\n"
-        "   **必须以【对话语境参考时间】为基准**换算相对时间（「几分钟后」= 参考时刻 + 若干分钟，写出结果时刻）。\n"
+        "7. trigger_time 字符串格式见上文「用户消息」开头说明（可到月/日/时，不必强行写分秒）。\n"
+        "   若文首列出【相对时间换算结果】且本条与之对应，**直接采用表中绝对时间**；否则须以【对话语境参考时间】为基准换算相对时间。\n"
         "   对照【服务器当前时间】核对是否合理，禁止凭空年份。\n"
         "   绝对日期：用户说「今年 6 月 15 日」须用参考时间所在自然年；未提年份时用「即将到来」的那一次日期。\n"
         "8. trigger_content 填写「情景详细描述」：客观记录当时约定的时间点、事件、用户情绪与关键事实（若干句），"
@@ -535,6 +646,10 @@ def _call_extract_llm(
             logger.warning("关怀抽取 LLM 重试失败: %s", e2)
             return None
     raw = _ollama_message_content(r)
+    logger.debug(
+        "关怀抽取模型原始输出: %r",
+        (raw[:800] + ("…" if len(raw) > 800 else "")) if raw else raw,
+    )
     parsed = _parse_llm_reminder_json(raw)
     if parsed is not None:
         return parsed
@@ -562,8 +677,8 @@ def _call_extract_llm(
                     "content": (
                         "你的上一段输出无法被标准 JSON 解析。"
                         "请只输出一个 JSON 对象，不要 markdown、不要中文解释。"
-                        '格式：{"reminders":[]}；多条时数组内每项含 trigger_type、trigger_time、'
-                        "trigger_content。字符串内双引号必须转义为 \\\" 。"
+                        '格式：{"reminders":[]}；多条时每项须含四类之一的 trigger_type、trigger_time、trigger_content；'
+                        "**无法归类则省略该条，不要编造类型。**字符串内双引号必须转义为 \\\" 。"
                     ),
                 },
             ],
@@ -573,6 +688,10 @@ def _call_extract_llm(
         logger.warning("关怀抽取纠错轮调用失败: %s", e)
     else:
         raw2 = _ollama_message_content(r2)
+        logger.debug(
+            "关怀抽取纠错轮模型输出: %r",
+            (raw2[:800] + ("…" if len(raw2) > 800 else "")) if raw2 else raw2,
+        )
         parsed = _parse_llm_reminder_json(raw2)
         if parsed is not None:
             return parsed
@@ -584,6 +703,19 @@ def _call_extract_llm(
         tail[:480].replace("\r", " ").replace("\n", "\\n"),
     )
     return None
+
+
+def _raw_trigger_type_from_item(it: dict[str, Any]) -> object:
+    """读取 ``trigger_type``；兼容小模型把类别写在 ``type`` / ``kind`` 等键下。"""
+    v = it.get("trigger_type")
+    if v is not None and str(v).strip():
+        return v
+    for alt in ("type", "kind", "category", "reminder_type", "triggerType"):
+        v2 = it.get(alt)
+        if v2 is not None and str(v2).strip():
+            logger.debug("关怀抽取：条目使用别名字段 %r 作为 trigger_type", alt)
+            return v2
+    return it.get("trigger_type")
 
 
 def extract_and_persist_reminders(
@@ -616,9 +748,10 @@ def extract_and_persist_reminders(
     pkg_norm, period_overview = _long_memory_overview_for_package(user_id, package_key)
     context_prefix = _build_remind_extract_context(user_id, pkg_norm, period_overview)
 
-    server_now = datetime.now()
+    server_now = _now_local_from_timestamp()
     parsed_scene = _parse_scene_time_string(scene_time)
     ref_now = parsed_scene if parsed_scene is not None else server_now
+    offset_hints = _resolve_relative_offsets(ui, ref_now)
 
     obj = _call_extract_llm(
         ui,
@@ -626,6 +759,7 @@ def extract_and_persist_reminders(
         context_prefix=context_prefix,
         reference_now=ref_now,
         server_now=server_now,
+        offset_hints=offset_hints,
     )
     if not obj:
         logger.info(
@@ -664,29 +798,36 @@ def extract_and_persist_reminders(
     inserted = 0
     skipped_parse = 0
     skipped_past = 0
-    skipped_type = 0
+    skipped_bad_type = 0
     for it in items[:_MAX_REMINDERS_PER_TURN]:
         if not isinstance(it, dict):
             continue
-        raw_type = it.get("trigger_type")
+        raw_type = _raw_trigger_type_from_item(it)
         tt = _normalize_trigger_type(raw_type)
         if not tt:
-            raw_s = str(raw_type or "").strip()
-            if raw_s:
-                tt = "日常关怀"
-                logger.info(
-                    "关怀抽取：trigger_type 无法归入四类，已降级为「日常关怀」入库 raw=%r",
-                    raw_type,
-                )
-            else:
-                skipped_type += 1
-                logger.debug("关怀抽取跳过：trigger_type 为空")
-                continue
-        dt_raw = _parse_trigger_time(str(it.get("trigger_time") or ""))
-        if dt_raw is None:
-            skipped_parse += 1
-            logger.debug("关怀抽取跳过：无法解析时间 %r", it.get("trigger_time"))
+            skipped_bad_type += 1
+            logger.info(
+                "关怀抽取跳过：trigger_type 不属于四类或未识别（视为 LLM 判定跳过本条）raw=%r item_keys=%s",
+                raw_type,
+                sorted(it.keys()),
+            )
             continue
+        dt_raw = _parse_trigger_time(str(it.get("trigger_time") or ""))
+        anchor = _relative_minute_anchor(ui, ref_now)
+        if dt_raw is None:
+            if anchor is None:
+                skipped_parse += 1
+                logger.debug("关怀抽取跳过：无法解析时间 %r", it.get("trigger_time"))
+                continue
+            dt_raw = anchor
+        elif anchor is not None and abs((dt_raw - anchor).total_seconds()) > 120:
+            logger.info(
+                "关怀抽取：「N 分钟后」锚点与模型 trigger_time 偏差>120s，采用服务器锚点 model=%s anchor=%s",
+                dt_raw,
+                anchor,
+            )
+            dt_raw = anchor
+        dt_raw = _clamp_model_year_to_reference(dt_raw, ref_now, ui, ar)
         dt = _roll_trigger_time_to_future(dt_raw, server_now)
         if dt < server_now - _SKEW:
             skipped_past += 1
@@ -721,12 +862,12 @@ def extract_and_persist_reminders(
             )
     logger.info(
         "关怀抽取本轮 user_id=%s model=%s 模型给出条目=%s 写入库=%s "
-        "(跳过:类型=%s 时间解析=%s 已过期=%s)",
+        "(跳过:无效类型=%s 时间解析=%s 已过期=%s)",
         user_id,
         _model_name(),
         len(items),
         inserted,
-        skipped_type,
+        skipped_bad_type,
         skipped_parse,
         skipped_past,
     )

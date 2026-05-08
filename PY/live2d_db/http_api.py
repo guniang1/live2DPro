@@ -1117,7 +1117,19 @@ async def remind_triggers_scan_now() -> RemindSchedulerScanNowPublic:
     """立即执行一轮定时关怀扫描（不等后台间隔）。无鉴权，生产环境请自行加认证。"""
     from live2d_db.remind_trigger_scheduler import run_scan_tick
 
-    stats = await run_scan_tick()
+    # 扫描内每条投递可能调用 Ollama + MiMo；无超时会导致 HTTP 长时间无响应
+    sec = float(os.getenv("REMIND_SCAN_NOW_HTTP_TIMEOUT_SEC", "600"))
+    try:
+        stats = await asyncio.wait_for(run_scan_tick(), timeout=sec)
+    except asyncio.TimeoutError:
+        logger.error(
+            "POST /remind-triggers/scan-now 整体超时（%.0fs），请检查 Ollama/MiMo 或到期条数是否过多",
+            sec,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=f"定时关怀扫描超时（{int(sec)}s），请检查 Ollama / MiMo 是否正常或减少单次待投递条数",
+        ) from None
     return RemindSchedulerScanNowPublic(ok=True, **stats)
 
 

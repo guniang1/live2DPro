@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 _stop_event: Optional[asyncio.Event] = None
 _background_task: Optional[asyncio.Task[None]] = None
 
-# 默认 5 分钟；可用 REMIND_TRIGGER_SCAN_INTERVAL_SEC 覆盖（最小 5 秒）
-_SCAN_INTERVAL_SEC = max(5, int(os.getenv("REMIND_TRIGGER_SCAN_INTERVAL_SEC", "300")))
+# 默认 60 秒一轮，到期后更快经 /ws/chat 推送；可用 REMIND_TRIGGER_SCAN_INTERVAL_SEC 覆盖（最小 5 秒）
+_SCAN_INTERVAL_SEC = max(5, int(os.getenv("REMIND_TRIGGER_SCAN_INTERVAL_SEC", "60")))
 _BATCH_LIMIT = max(1, min(int(os.getenv("REMIND_TRIGGER_SCAN_BATCH", "200")), 2000))
 
 

@@ -9,6 +9,7 @@
 概要可为闲聊主题；「【用户】」「【角色】」**可选用**，出现次数不限。材料很长时应 **多分句覆盖各话题**。
 仅当摘要仍为空时尝试修复 LLM；失败则置空。调度参数见模块常量；
 ``OLLAMA_MODEL`` / ``OLLAMA_HOST`` 与聊天共用。
+后台循环按 ``LONG_MEMORY_SCAN_POLL_INTERVAL_SEC``（默认 300 秒）轮询候选；同一 user×包两次合并仍受 ``_MIN_GAP_SEC``（默认 24h）约束。
 """
 
 from __future__ import annotations
@@ -39,8 +40,9 @@ logger = logging.getLogger(__name__)
 _stop_event: Optional[asyncio.Event] = None
 _background_task: Optional[asyncio.Task[None]] = None
 
-# 周期概要更新的调度与时间窗（写死，不新增环境变量）。模型与 Ollama 地址与聊天共用 OLLAMA_MODEL / OLLAMA_HOST。
-_INTERVAL_SEC = 86400
+# 周期概要更新的调度与时间窗。模型与 Ollama 地址与聊天共用 OLLAMA_MODEL / OLLAMA_HOST。
+# 后台「扫描候选」间隔（秒）：仅决定多久跑一次 list_candidates；与同一 user×包最短合并间隔 _MIN_GAP_SEC 无关。
+_POLL_INTERVAL_SEC = max(60, int(os.getenv("LONG_MEMORY_SCAN_POLL_INTERVAL_SEC", "300")))
 _SOURCE_WINDOW_SEC = 86400  # 最近 24 小时内 chat_session
 _MIN_GAP_SEC = 86400  # 同一 user×包两次周期概要更新之间的最短间隔
 # 送入摘要模型的叙述材料上限；超长时用「首+尾」保留，避免只留尾部时丢掉早期称呼/话题
@@ -739,23 +741,28 @@ def run_manual_long_memory_backfill() -> int:
     return len(pairs)
 
 
-def _run_tick() -> None:
+def _run_tick() -> list[tuple[int, str]]:
+    """扫描候选并执行合并；返回本次 **确实写入库** 的 ``(user_id, package_key_norm)`` 列表。"""
     redis_cli = get_redis_client(logger)
     with connection_ctx() as conn:
         candidates = LongMemoryRepository.list_candidates_for_consolidation(
             conn, _SOURCE_WINDOW_SEC, _MIN_GAP_SEC
         )
+    updated: list[tuple[int, str]] = []
     for uid, pkg_norm, _ in candidates:
         try:
             with connection_ctx() as conn2:
-                consolidate_one(conn2, redis_cli, uid, pkg_norm)
+                ok = consolidate_one(conn2, redis_cli, uid, pkg_norm)
+            if ok:
+                updated.append((uid, pkg_norm))
         except Exception:
             logger.exception("长期记忆单组周期概要更新异常 user_id=%s pkg=%s", uid, pkg_norm)
+    return updated
 
 
 async def _sleep_interval_or_until_stop() -> None:
     assert _stop_event is not None
-    interval = float(_INTERVAL_SEC)
+    interval = float(_POLL_INTERVAL_SEC)
     t_stop = asyncio.create_task(_stop_event.wait())
     t_sleep = asyncio.create_task(asyncio.sleep(interval))
     _done, pending = await asyncio.wait({t_stop, t_sleep}, return_when=asyncio.FIRST_COMPLETED)
@@ -783,8 +790,8 @@ async def start_long_memory_consolidator() -> None:
     _stop_event = asyncio.Event()
     _background_task = asyncio.create_task(_background_loop(), name="long_memory_consolidator")
     logger.info(
-        "长期记忆后台任务已启动 interval=%ss source_window=%ss min_gap=%ss（参数见 consolidator 模块常量）",
-        _INTERVAL_SEC,
+        "长期记忆后台任务已启动 poll_interval=%ss source_window=%ss min_gap=%ss（参数见 consolidator 模块常量）",
+        _POLL_INTERVAL_SEC,
         _SOURCE_WINDOW_SEC,
         _MIN_GAP_SEC,
     )

@@ -1,9 +1,18 @@
 """定时关怀投递时生成对用户说的话术。
 
-库表 ``remind_trigger.trigger_content`` 存**情景详细描述**；投递时由 LLM **重新生成**面向用户的台词：
-结合库内情景、``session_id`` 对应单轮 ``chat_session``、当前模型包在 Redis 中的**瞬时记忆**（与 ``/ws/chat``
-同键分桶；**仅**最近多轮对话原文列表，**不含**短期压缩层）、可选人设块与用户画像块，在**触发/补发当次**
-拼入提示词后调用 Ollama。WebSocket 帧中 ``delivery_message`` 承载生成稿；``trigger_content`` 与 REST 一致，均为库内情景原文。
+库表 ``remind_trigger.trigger_content`` 存**情景详细描述**；投递时由 LLM **重新撰写**面向用户的台词。
+写入 LLM **User** 消息的拼装顺序（与论文 6.5.1 一致）：
+
+1. 人设块（可选）：从 MySQL 表 ``persona`` 经 ``PersonaRepository.resolve_persona_for_package`` 读取当前包的 ``tone_style`` / ``character_desc``；
+2. 用户画像块（可选）：``USER_PROFILE_IN_CHAT`` 未关闭且画像存在非空字段时，``format_profile_for_chat_system`` → ``【用户画像】``；
+3. 当前对话瞬时记忆（可选）：与 ``/ws/chat`` 相同 ``(user_id, package_key)`` 分桶，Redis List 按时间顺序的多轮 user/assistant 原文，**不含**短期压缩层；
+4. **关怀类型**：``trigger_type``；
+5. **情景详细描述**：库内 ``trigger_content``（无则正文写 ``未提供``）；
+6. **关联对话原文**：``session_id`` → ``chat_session.user_input`` / ``ai_reply``；无有效 ``session_id`` 或无法读取则正文写 ``未绑定``。
+
+系统提示要求当场口语、以情景与瞬时对话为主轴，可呼应关联单轮与人设/画像；输出 1～3 句中文；禁止 JSON/Markdown；约 800 字上限（代码侧超长截断加 ``…``）。
+模型 ``REMIND_DELIVERY_MODEL``（缺省同 ``OLLAMA_MODEL``）；可选 ``REMIND_DELIVERY_TEMPERATURE``、``REMIND_DELIVERY_NUM_PREDICT``。
+``delivery_message`` 为生成稿；``trigger_content`` 与 REST 一致为库内情景原文。
 """
 
 from __future__ import annotations
@@ -13,13 +22,18 @@ import os
 import re
 
 import ollama
+import pymysql.err
 
 from live2d_db.connection import connection_ctx
 from live2d_db.db_config import DbConfig
 from live2d_db.entities import RemindTrigger
 from live2d_db.memory_layers import read_instant_turns_chronological
 from live2d_db.redis_factory import get_redis_client
-from live2d_db.repositories import ChatSessionRepository, UserProfileRepository
+from live2d_db.repositories import (
+    ChatSessionRepository,
+    PersonaRepository,
+    UserProfileRepository,
+)
 from utils.user_profile_refresh import chat_inject_enabled, format_profile_for_chat_system
 
 logger = logging.getLogger(__name__)
@@ -27,6 +41,13 @@ logger = logging.getLogger(__name__)
 _MAX_OUT_CHARS = 800
 _MAX_SESSION_TURN_CHARS = 12_000
 _MAX_INSTANT_BLOCK = 4500
+_PERSONA_BLOCK_MAX = 3500
+
+# 去掉模型复读 trigger_content 中带相对时间的悖论措辞（如「1分钟前祝你…」）
+_TIME_PARADOX_RE = re.compile(
+    r"[0-9０-９一两三四五六七八九十百]+\s*(?:分钟|小时|秒钟?)(?:前|后)[^，。！？\n]{0,30}",
+    re.UNICODE,
+)
 
 
 def _delivery_model() -> str:
@@ -34,6 +55,26 @@ def _delivery_model() -> str:
         os.getenv("REMIND_DELIVERY_MODEL")
         or os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
     ).strip()
+
+
+def _delivery_temperature() -> float:
+    raw = (os.getenv("REMIND_DELIVERY_TEMPERATURE") or "").strip()
+    if not raw:
+        return 0.55
+    try:
+        return max(0.0, min(2.0, float(raw)))
+    except ValueError:
+        return 0.55
+
+
+def _delivery_num_predict() -> int:
+    raw = (os.getenv("REMIND_DELIVERY_NUM_PREDICT") or "").strip()
+    if not raw:
+        return 512
+    try:
+        return max(64, min(2048, int(raw)))
+    except ValueError:
+        return 512
 
 
 def _ollama_client() -> ollama.Client:
@@ -59,6 +100,54 @@ def _ollama_message_content(resp: object) -> str:
         return str(m.get("content") or "").strip()
     c = getattr(m, "content", None)
     return str(c).strip() if c is not None else ""
+
+
+def _persona_mysql_block(user_id: int, package_key: str) -> str:
+    """从 MySQL ``persona`` 表解析用户与模型包的人设（语气 + 角色设定），与 ``/ws/chat`` 包级人设同源。"""
+    if user_id < 1:
+        return ""
+    pkg = (package_key or "").strip()
+    if not pkg:
+        return ""
+    try:
+        with connection_ctx(DbConfig.from_env()) as conn:
+            row = PersonaRepository.resolve_persona_for_package(conn, user_id, pkg)
+        if row is None:
+            return ""
+        tone = (row.tone_style or "").strip()
+        desc = (row.character_desc or "").strip()
+        if not tone and not desc:
+            return ""
+        parts: list[str] = []
+        if tone:
+            parts.append(f"【语气风格】\n{tone}")
+        if desc:
+            parts.append(f"【角色设定】\n{desc}")
+        blob = "\n\n".join(parts).strip()
+        if len(blob) <= _PERSONA_BLOCK_MAX:
+            return blob
+        return blob[: max(1, _PERSONA_BLOCK_MAX - 1)].rstrip() + "…"
+    except pymysql.err.ProgrammingError as e:
+        code = e.args[0] if e.args else None
+        if code in (1146, 1054):
+            logger.warning(
+                "关怀话术读取人设跳过（persona 表或列不可用 errno=%s）",
+                code,
+            )
+            return ""
+        logger.exception(
+            "关怀话术读取 MySQL persona 失败 user_id=%s package=%s",
+            user_id,
+            pkg,
+        )
+        return ""
+    except Exception:
+        logger.exception(
+            "关怀话术读取 MySQL persona 失败 user_id=%s package=%s",
+            user_id,
+            pkg,
+        )
+        return ""
 
 
 def _redis_instant_memory_prompt_block(user_id: int, package_key: str) -> str:
@@ -92,13 +181,18 @@ def _redis_instant_memory_prompt_block(user_id: int, package_key: str) -> str:
         block = block[: _MAX_INSTANT_BLOCK - 1].rstrip() + "…"
     if not block:
         return ""
-    return f"【当前对话瞬时记忆（Redis，当前模型包；不含短期压缩摘要）】\n{block}"
+    return f"【当前对话瞬时记忆】\n{block}"
 
 
 def _session_dialogue_prompt_block(t: RemindTrigger) -> str:
     """``session_id`` → 该轮 ``chat_session`` 原文（用户 + 助手），作为触发时语境。"""
     sid = t.session_id
     if sid is None:
+        return ""
+    try:
+        if int(sid) < 1:
+            return ""
+    except (TypeError, ValueError):
         return ""
     try:
         with connection_ctx(DbConfig.from_env()) as conn:
@@ -135,11 +229,38 @@ def _session_dialogue_prompt_block(t: RemindTrigger) -> str:
         return ""
 
 
+def _post_process_delivery(s: str) -> str:
+    """去掉模型输出中含时间悖论的短语（如「1分钟前祝你…」）。"""
+    cleaned = _TIME_PARADOX_RE.sub("", (s or "").strip()).strip()
+    cleaned = re.sub(r"[，、]\s*[。！？]", "。", cleaned)
+    cleaned = re.sub(r"[。！？]{2,}", "。", cleaned)
+    return cleaned.strip()
+
+
+def _strip_trigger_type_brackets(s: str, trigger_type: str | None) -> str:
+    """去掉对用户可见文案中的「【日常关怀】」等与 trigger_type 一致或模型残留的【…】栏目标签。"""
+    out = (s or "").strip()
+    tt = (trigger_type or "").strip()
+    if tt:
+        out = re.sub(re.escape(f"【{tt}】") + r"[：:\s\u3000]*", "", out).strip()
+    while True:
+        m = re.match(r"^【[^】]{1,32}】[：:\s\u3000]*", out)
+        if not m:
+            break
+        out = out[m.end() :].strip()
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    return out
+
+
 def _fallback_line(t: RemindTrigger) -> str:
+    if not (t.trigger_type or "").strip():
+        return ""
     s = (t.trigger_content or "").strip()
     if s:
-        return (s[:240] + "…") if len(s) > 240 else s
-    return "今天过得怎么样？过来陪你聊一会儿好吗？"
+        s = (s[:240] + "…") if len(s) > 240 else s
+    else:
+        s = "今天过得怎么样？过来陪你聊一会儿好吗？"
+    return _strip_trigger_type_brackets(s, t.trigger_type)
 
 
 def _strip_model_output(raw: str) -> str:
@@ -154,7 +275,15 @@ def _strip_model_output(raw: str) -> str:
             lines = lines[:-1]
         s = "\n".join(lines).strip()
     s = re.sub(r"^[\"'「](.+)[\"'」]$", r"\1", s.strip(), flags=re.DOTALL)
-    return s.strip()
+    s = s.strip()
+    # 去掉模型偶发的栏目前缀（如「【日常关怀】」「【日常关怀】：…」；兼容全角冒号与空白）
+    while True:
+        m = re.match(r"^【[^】]{1,32}】[：:\s\u3000]*", s)
+        if not m:
+            break
+        s = s[m.end() :].strip()
+    logger.debug("关怀话术剥除后: %r", s[:200])
+    return s
 
 
 def delivery_use_llm() -> bool:
@@ -168,6 +297,8 @@ def delivery_use_llm() -> bool:
 
 def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
     """结合情景描述、关联单轮、Redis 瞬时多轮对话与人设/画像，由 LLM 重新生成对用户展示的话术。"""
+    if not (t.trigger_type or "").strip():
+        return ""
     if not delivery_use_llm():
         return _fallback_line(t)
 
@@ -176,17 +307,15 @@ def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
     pkg = (package_key or "").strip() or "default"
     memory_block = _redis_instant_memory_prompt_block(int(t.user_id), pkg)
 
-    persona = ""
     try:
-        from utils.remind_extract import _persona_block_for_package
-
-        persona = _persona_block_for_package(t.user_id, pkg)
+        persona = _persona_mysql_block(int(t.user_id), pkg)
     except Exception:
         logger.exception(
             "关怀话术：读取人设块失败 trigger_id=%s user_id=%s",
             t.trigger_id,
             t.user_id,
         )
+        persona = ""
 
     profile_block = ""
     uid = int(t.user_id)
@@ -206,16 +335,20 @@ def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
         return _fallback_line(t)
 
     system = (
-        "你是 Live2D 数字人，正在对用户执行一条「预约定时关怀」。\n"
-        "输入可能依次包含：【当前模型人设】；【用户画像】——系统侧对用户标签、情感基调、偏好与困扰等的摘要，"
-        "用于你了解对方并写出更贴切的问候（勿逐条背诵画像原文，也不要向用户暴露「画像」「系统」等字眼）；"
-        "【当前对话瞬时记忆】——来自 Redis List、与主对话同包分桶的**最近多轮原文**（不含短期压缩摘要层；"
-        "可能晚于提醒创建时刻，代表用户**此刻**正在聊的内容；若无则该段落不出现）；"
-        "【关怀类型】；【情景详细描述】（创建提醒时写入库的客观记录，不是最终台词）；"
-        "【关联对话原文】（来自 remind_trigger.session_id 对应的单轮 chat_session，即产生提醒时的那一轮）。\n"
-        "请**重新撰写**你对用户**当场说出**的一段话：1～3 句中文，口语化、自然温暖；以情景详细描述与"
-        "当前瞬时对话为主轴，可呼应关联单轮与人设/画像；**不要编造各材料中均不存在的事实**。\n"
-        "禁止输出 JSON、列表、Markdown；不要复述栏目名。"
+        "【绝对禁止】不许说「X分钟后我会……」「稍后我将……」「我等会儿……」；"
+        "不许在输出里出现「【日常关怀】」「【生日】」等类型标签。\n"
+        "此刻就是触发当下，直接对用户表达关心，就像朋友突然想起来搭一句话。\n\n"
+        "你是 Live2D 数字人。此刻请**重新撰写**你对用户**当场说出的一段台词**（就像真人刚好想起来搭一句话），"
+        "不是在播报定时任务、也不是客服工单。\n\n"
+        "输入材料按顺序可能包含：【当前模型人设】（来自服务端 MySQL 人设表 persona，仅供语气与角色一致性）；【用户画像】（内部摘要，仅用于把握语气与关切点，勿背诵原文，"
+        "勿对用户提「画像」「系统」「后台」）；【当前对话瞬时记忆】（与主对话同包分桶的 Redis 最近多轮原文，不含短期压缩摘要；"
+        "可能比提醒创建时更新；若无则该段不出现）；【关怀类型】；【情景详细描述】（入库备忘，常含相对时间或草稿措辞，"
+        "**不是**要你逐字念给用户听的台词）；【关联对话原文】（生成提醒那一轮的 user/assistant，若无有效绑定则正文为「未绑定」）。\n\n"
+        "**主轴**：以「情景详细描述」与「当前对话瞬时记忆」为主组织语气与话题；可自然呼应「关联对话原文」以及人设、画像中的关切点。\n"
+        "**输出**：连续 1～3 句口语化中文，温暖自然；不要编造材料里不存在的事实；禁止 JSON、Markdown、项目符号列表。\n"
+        "**长度**：约 800 汉字以内；若自觉会超长则自行收束（服务端也会对过长输出截断）。\n\n"
+        "勿嵌套复述情景里的整句草稿；勿照搬情景中带「N 分钟前/后」等易造成时间悖论的措辞；"
+        "勿输出「定时关怀」「预约提醒」等机器话术。"
     )
     parts: list[str] = []
     if persona:
@@ -225,8 +358,8 @@ def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
     if memory_block:
         parts.append(memory_block)
     parts.append(f"【关怀类型】{t.trigger_type}")
-    parts.append(f"【情景详细描述】\n{scenario or '（未提供）'}")
-    parts.append(f"【关联对话原文】\n{session_text or '（未绑定）'}")
+    parts.append(f"【情景详细描述】\n{scenario or '未提供'}")
+    parts.append(f"【关联对话原文】\n{session_text or '未绑定'}")
     user_content = "\n\n".join(parts)
 
     cli = _ollama_client()
@@ -238,7 +371,10 @@ def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_content},
             ],
-            options={"temperature": 0.45, "num_predict": 512},
+            options={
+                "temperature": _delivery_temperature(),
+                "num_predict": _delivery_num_predict(),
+            },
         )
     except Exception:
         logger.exception(
@@ -249,6 +385,8 @@ def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
         return _fallback_line(t)
 
     line = _strip_model_output(_ollama_message_content(r))
+    line = _post_process_delivery(line)
+    line = _strip_trigger_type_brackets(line, t.trigger_type)
     if not line:
         return _fallback_line(t)
     if len(line) > _MAX_OUT_CHARS:

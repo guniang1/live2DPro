@@ -507,15 +507,26 @@ function handleTextChatIncoming(event) {
             index: data.index,
             size: data.size
         };
-        applyVisibleTextSegment(data.content, {
-            expression: data.expression,
-            motion: data.motion
-        });
+        // 定时关怀朗读：正文已在 remind_trigger 里用橙色气泡展示，勿再走流式 AI 紫气泡
+        if (!data.remind_audio) {
+            applyVisibleTextSegment(data.content, {
+                expression: data.expression,
+                motion: data.motion
+            });
+        }
     } else if (data.type === "remind_trigger") {
-        const scene = String(data.trigger_type || "提醒").trim();
+        const scene = String(data.trigger_type ?? "").trim();
         const body = String(data.delivery_message ?? "").trim();
-        const line = body ? `【${scene}】${body}` : `【${scene}】`;
-        appendChatMessage("remind", line);
+        // trigger_type 为空表示无需展示关怀；正文为空也不使用兜底话术
+        if (!scene || !body) {
+            console.info(
+                "[remind_trigger] skip empty type or body",
+                data.trigger_id,
+                { scene: !!scene, bodyLen: body.length }
+            );
+            return;
+        }
+        appendChatMessage("remind", body);
         console.info("[remind_trigger]", data.trigger_id, scene);
     } else if (data.type === "done") {
         pendingAudioMeta = null;
