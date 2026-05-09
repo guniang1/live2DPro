@@ -233,9 +233,9 @@
     }
 
     #live2d-toolbar {
-      position: absolute;
-      top: 12px;
-      right: 12px;
+      position: fixed;
+      top: max(12px, env(safe-area-inset-top));
+      right: max(12px, env(safe-area-inset-right));
       display: flex;
       flex-direction: row;
       align-items: flex-start;
@@ -248,7 +248,7 @@
       border: 1px solid var(--border-subtle);
       box-shadow: 0 6px 18px rgba(40, 38, 36, 0.06);
       pointer-events: auto;
-      z-index: 100;
+      z-index: 110;
     }
 
     #toolbar-gear-btn {
@@ -378,35 +378,7 @@
       opacity: 0.92;
     }
 
-    .toolbar-care-hint {
-      margin: 0 0 11px;
-      padding: 8px 10px 8px 28px;
-      list-style: none;
-      font-size: 11px;
-      line-height: 1.55;
-      color: rgba(90, 85, 80, 0.62);
-      background: rgba(255, 255, 255, 0.28);
-      border-radius: 10px;
-      border: 1px solid rgba(110, 98, 90, 0.08);
-    }
 
-    .toolbar-care-hint li {
-      position: relative;
-      margin: 0.28em 0;
-    }
-
-    .toolbar-care-hint li::before {
-      content: "";
-      position: absolute;
-      left: -16px;
-      top: 0.55em;
-      width: 5px;
-      height: 5px;
-      border-radius: 50%;
-      background: linear-gradient(145deg, #c4a898, #a88878);
-      opacity: 0.75;
-      box-shadow: 0 0 0 2px rgba(196, 168, 152, 0.2);
-    }
 
     #remind-scan-now-btn {
       width: 100%;
@@ -549,7 +521,7 @@
       line-height: 1;
       color: #f5f3f0;
       cursor: pointer;
-      background: linear-gradient(145deg, #b0a8a4 0%, #9a928e 100%);
+      /* background: linear-gradient(145deg, #b0a8a4 0%, #9a928e 100%); */
       box-shadow: 0 3px 12px rgba(40, 38, 36, 0.12);
       transition: transform 0.15s ease, box-shadow 0.2s;
     }
@@ -557,11 +529,10 @@
     #record-btn:hover {
       transform: scale(1.03);
       box-shadow: 0 4px 14px rgba(40, 38, 36, 0.14);
+      background-color: rgb(93, 199, 79);
     }
 
-    #record-btn:active {
-      transform: scale(0.98);
-    }
+
 
     #record-status {
       max-width: 220px;
@@ -581,57 +552,6 @@
 <body>
   <div id="app-layout">
     <aside id="chat-panel">
-      <div id="live2d-toolbar">
-        <button type="button" id="toolbar-gear-btn" aria-label="展开工具" aria-expanded="false" title="小工具">
-          <img src="/Resources/icon_gear.png" alt="" width="22" height="22">
-        </button>
-        <div id="toolbar-expand">
-          <button type="button" id="model-next-btn">切换模型</button>
-          <span id="model-status"></span>
-          <button type="button" id="bg-next-btn">切换背景</button>
-          <span id="bg-status"></span>
-          <button type="button" id="upload-model-btn">上传模型</button>
-          <button type="button" id="upload-tts-btn">上传音色</button>
-          <button type="button" id="upload-character-btn">角色定义</button>
-          <button
-            type="button"
-            id="long-memory-consolidate-btn"
-            data-default-label="总结长期记忆"
-            title="基于近期对话立即生成/追加长期记忆摘要（需 Ollama；不受后台 24 小时周期限制；无窗口内会话或模型未产出时不会写入）"
-            aria-label="总结长期记忆：根据近期对话立即更新周期概要"
-          >
-            总结长期记忆
-          </button>
-
-          <div class="toolbar-divider" aria-hidden="true"></div>
-
-          <div class="toolbar-care-card" role="region" aria-label="定时关怀">
-            <div class="toolbar-care-card__header">
-              <span class="toolbar-care-card__icon-wrap" aria-hidden="true">⏱</span>
-              <div class="toolbar-care-card__titles">
-                <span class="toolbar-care-card__title">定时关怀</span>
-                <span class="toolbar-care-card__subtitle">到期触发 · 手动扫描</span>
-              </div>
-            </div>
-            <ul class="toolbar-care-hint">
-              <li>点聊天栏右上角的齿轮，展开或收起本工具列表</li>
-              <li>保持已登录且左侧聊天已连接，推送才会以气泡显示（离线会记入统计「离线」）</li>
-            </ul>
-            <button
-              type="button"
-              id="remind-scan-now-btn"
-              data-default-label="立即扫描到期项"
-              title="请求服务端立即扫描 remind_trigger；需 WebSocket 聊天在线才有气泡"
-              aria-label="定时关怀：立即扫描到期未触发的提醒"
-            >
-              <span class="toolbar-btn-care__glyph" aria-hidden="true">◎</span>
-              <span class="toolbar-btn-care__label">立即扫描到期项</span>
-            </button>
-          </div>
-
-          <button type="button" id="logout-btn">退出登录</button>
-        </div>
-      </div>
       <div id="chat-header">和 Ta 聊聊天</div>
       <div id="chat-list" role="log" aria-live="polite" aria-relevant="additions"></div>
       <div id="chat-input-bar">
@@ -640,6 +560,55 @@
       </div>
     </aside>
     <main id="live2d-panel"></main>
+  </div>
+
+  <div id="live2d-toolbar">
+    <button type="button" id="toolbar-gear-btn" aria-label="展开工具" aria-expanded="false" title="小工具">
+      <img src="/Resources/icon_gear.png" alt="" width="22" height="22">
+    </button>
+    <div id="toolbar-expand">
+      <button type="button" id="model-next-btn">切换模型</button>
+      <span id="model-status"></span>
+      <button type="button" id="bg-next-btn">切换背景</button>
+      <span id="bg-status"></span>
+      <button type="button" id="upload-model-btn">上传模型</button>
+      <button type="button" id="upload-tts-btn">上传音色</button>
+      <button type="button" id="upload-character-btn">角色定义</button>
+      <button
+        type="button"
+        id="long-memory-consolidate-btn"
+        data-default-label="总结长期记忆"
+        title="基于近期对话立即生成/追加长期记忆摘要（需 Ollama；不受后台 24 小时周期限制；无窗口内会话或模型未产出时不会写入）"
+        aria-label="总结长期记忆：根据近期对话立即更新周期概要"
+      >
+        总结长期记忆
+      </button>
+
+      <div class="toolbar-divider" aria-hidden="true"></div>
+
+      <div class="toolbar-care-card" role="region" aria-label="定时关怀">
+        <div class="toolbar-care-card__header">
+          <span class="toolbar-care-card__icon-wrap" aria-hidden="true">⏱</span>
+          <div class="toolbar-care-card__titles">
+            <span class="toolbar-care-card__title">定时关怀</span>
+            <span class="toolbar-care-card__subtitle">到期触发 · 手动扫描</span>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          id="remind-scan-now-btn"
+          data-default-label="立即扫描到期项"
+          title="请求服务端立即扫描 remind_trigger；需 WebSocket 聊天在线才有气泡"
+          aria-label="定时关怀：立即扫描到期未触发的提醒"
+        >
+          <span class="toolbar-btn-care__glyph" aria-hidden="true">◎</span>
+          <span class="toolbar-btn-care__label">立即扫描到期项</span>
+        </button>
+      </div>
+
+      <button type="button" id="logout-btn">退出登录</button>
+    </div>
   </div>
 
   <div id="record-ui">

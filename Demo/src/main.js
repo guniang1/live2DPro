@@ -58,12 +58,10 @@ function resolveChatHistoryUserId() {
     return uid;
 }
 
+// 暂时没有特殊功能
 function formatChatHistoryHeader(loadedRounds, hasMoreOlder) {
-    if (loadedRounds <= 0) {
-        return '和 Ta 聊聊天（还没有旧记录，先说一句吧）';
-    }
-    const tail = hasMoreOlder ? ' · 上滑加载更早' : '';
-    return `和 Ta 聊聊天（已接上 ${loadedRounds} 轮回忆${tail}）`;
+
+    return `和 Ta 聊聊天`;
 }
 
 async function loadOlderChatHistoryPage() {
