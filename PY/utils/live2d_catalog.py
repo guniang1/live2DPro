@@ -65,47 +65,83 @@ class Live2dCatalog:
         return [_motion_id_from_rel(p) for p in self.motion_paths]
 
     @property
-    def action_llm_system_text(self) -> str:
-        """专用于「动作/表情决策」模型（与聊天模型分离），要求只输出 JSON。
-
-        与 wschat._action_llm_user_content_sync 配合：规则侧强调为 Live2D 虚拟角色选型，
-        expression/motion 表示角色演绎资源，非真人用户。
-        """
+    def action_llm_task_instructions_only(self) -> str:
+        """表情/动作选型任务与输出格式（不含资源表、不含人设；供专用标签模型 system 段落拼接）。"""
         exn, mon = self.expression_names, self.motion_names
+        em_ex = exn[0] if exn else "<【表情】表中标识名>"
+        em_mo = mon[0] if mon else "<【动作】表中标识名>"
+        topic = (
+            "**选题对象**：标签值只描述**角色自身**的神态与肢体反应；**绝不**描写真人用户，也不要把用户正在做的事直接映射成角色的动作。\n"
+        )
+        tag_hint = "推荐使用小写 ``emotion`` / ``motion``（服务端亦识别大小写变体）。\n"
+
         if exn and mon:
-            sample_line = json.dumps(
-                {
-                    "reason": "……",
-                    "expression": exn[0],
-                    "motion": mon[0],
-                },
-                ensure_ascii=False,
+            return (
+                "你的任务：依据上文 **【表情与动作候选资源】**、**【角色人设】**，并结合 user 消息中的 "
+                "**【瞬时记忆】** 与 **【本轮用户输入】**，为 **Live2D 虚拟角色** "
+                "从候选表中各选一个【表情】与一个【动作】标识名。\n"
+                + topic
+                + "**硬性规则**：两行标签的值必须各自落在候选表中；禁止占位词「某表情标识名」「某动作标识名」；禁止留空一侧；"
+                "不要把路径或扩展名写入标签值；表情侧只能是【表情】标识名，动作侧只能是【动作】标识名。\n"
+                "输出格式（仅此两行，各占一行，无其它解释、无 markdown、无 JSON）：\n"
+                "`#emotion#` 紧跟表情标识名；下一行 `#motion#` 紧跟动作标识名。\n"
+                + tag_hint
+                + f"形状示例（名称须按情境从候选表另选真实项，**禁止照抄**）：\n"
+                f"#emotion#{em_ex}\n"
+                f"#motion#{em_mo}"
             )
-            sample_block = (
-                "JSON 键须包含 **reason、expression、motion**。\n"
-                "下方示例仅演示**合法字段名与 JSON 形状**；其中 expression、motion 各取自本包真实标识名一条。"
-                "**禁止**输出「某表情标识名」「某动作标识名」等占位词，也**禁止**照抄示例里具体的表情/动作（须按对话情境为**虚拟角色**另选上表中的项）。\n"
-                f"形状示例：\n{sample_line}"
+        if exn and not mon:
+            return (
+                "你的任务：依据上文 **【表情与动作候选资源】**、**【角色人设】**，并结合 user 消息中的 "
+                "**【瞬时记忆】** 与 **【本轮用户输入】**，为 **Live2D 虚拟角色** "
+                "从【表情】候选表中选一个标识名。当前包**无动作资源**，不要输出 `#motion#` 行，也不要编造动作名。\n"
+                + topic
+                + "**硬性规则**：只输出一行 `#emotion#`；值须落在【表情】候选表中；禁止占位词「某表情标识名」；"
+                "不要把路径或扩展名写入标签值。\n"
+                "输出格式（仅此一行，无其它解释、无 markdown、无 JSON）：\n"
+                "`#emotion#` 紧跟表情标识名。\n"
+                + tag_hint
+                + f"形状示例（名称须按情境从候选表另选真实项，**禁止照抄**）：\n"
+                f"#emotion#{em_ex}"
             )
-        else:
-            sample_block = (
-                "JSON 须含 **reason、expression、motion**；"
-                "expression / motion 必须为上表中存在的标识名，禁止输出「某表情标识名」「某动作标识名」。\n"
-                '{"reason":"……","expression":"<从【表情】表复制标识名>","motion":"<从【动作】表复制标识名>"}'
+        if mon and not exn:
+            return (
+                "你的任务：依据上文 **【表情与动作候选资源】**、**【角色人设】**，并结合 user 消息中的 "
+                "**【瞬时记忆】** 与 **【本轮用户输入】**，为 **Live2D 虚拟角色** "
+                "从【动作】候选表中选一个标识名。当前包**无表情资源**，不要输出 `#emotion#` 行，也不要编造表情名。\n"
+                + topic
+                + "**硬性规则**：只输出一行 `#motion#`；值须落在【动作】候选表中；禁止占位词「某动作标识名」；"
+                "不要把路径或扩展名写入标签值。\n"
+                "输出格式（仅此一行，无其它解释、无 markdown、无 JSON）：\n"
+                "`#motion#` 紧跟动作标识名。\n"
+                + tag_hint
+                + f"形状示例（名称须按情境从候选表另选真实项，**禁止照抄**）：\n"
+                f"#motion#{em_mo}"
             )
         return (
-            self.llm_context_text
-            + "\n\n你的任务：综合消息里的「人设参考」「最近对话（若有）」与「本轮用户输入」，判断 **Live2D 虚拟角色（助手）** "
-            "在当下对话中应表现出的神态与肢体，从上述标识名中为该**角色**的**表情、动作各选一个**。\n"
-            "**选题对象**：expression / motion **只描述角色自身的演绎资源**，表现角色对用户话语与会谈氛围的反应；"
-            "**绝不**表示真人用户此刻的表情或动作，也不要把「用户在做的事」直接映射成角色的 motion。\n"
-            "**硬性规则**：键 **expression** 与 **motion** 的值都必须是各自表中存在的标识名字符串；"
-            "**禁止**只填一侧、另一侧写空字符串 \"\"；也**禁止**用「与表情无关」「只选动作」等理由故意留空 expression。"
-            "若对话内容与某一侧较难对应，仍须为该**角色**从表中选一个**中性、通用**的项（例如偏日常基础脸型类表情 + 待机/轻量类动作），不得留空，不得选择身体部位（头不是表情）。\n"
-            "重要：expression **只能**来自【表情】表；motion **只能**来自【动作】表；不要把动作路径/文件名写进 expression，"
-            "不要把表情名写进 motion；motion 只写标识名（与表中一致），不要写带 motions/ 的路径。\n"
-            "只输出**一个** JSON 对象（不要 markdown 代码块、不要 JSON 外的文字）。\n"
-            + sample_block
+            "当前模型包的【表情】与【动作】候选均为空；无需输出 `#emotion#` / `#motion#` 标签。"
+        )
+
+    @property
+    def action_llm_system_text(self) -> str:
+        """资源表 + 任务说明（不含 MySQL 人设；人设由 wschat 专用标签请求写入 system 另段）。"""
+        return f"{self.llm_context_text}\n\n{self.action_llm_task_instructions_only}"
+
+    def action_llm_parallel_full_system(self, persona_block: str) -> str:
+        """表情/动作专用模型完整 system：候选资源 + 角色人设 + 任务说明。"""
+        pb = (persona_block or "").strip()
+        if not pb:
+            pb = (
+                "（当前未配置 MySQL 人设或用户为访客：请结合 user 中的「瞬时记忆」与「本轮用户输入」"
+                "推断角色基调并选型；标签值须落在资源表中已列出的标识名内，某一侧无资源则不要输出该侧标签。）"
+            )
+        return (
+            "【表情与动作候选资源】\n"
+            + self.llm_context_text
+            + "\n\n【角色人设】\n"
+            + pb
+            + "\n\n"
+            + self.action_llm_task_instructions_only
         )
 
 
@@ -245,12 +281,21 @@ def _build_llm_text(
         for rel in motion_paths:
             lines.append(f"- {rel} → 标识名: {_motion_id_from_rel(rel)}")
 
-    lines.extend(
-        [
-            "",
-            "说明：expression 与 motion 的值必须各为上表中某一行的「标识名」；不得编造表中不存在的名称，也不得留空（须从表中择一）。",
-        ]
-    )
+    lines.append("")
+    if not expression_paths and not motion_paths:
+        lines.append("说明：当前包未登记表情或动作资源。")
+    elif not motion_paths:
+        lines.append(
+            "说明：expression 须为【表情】表中某一行的「标识名」，不得编造；当前包无动作资源，不要输出 motion 标识名或 #motion# 行。"
+        )
+    elif not expression_paths:
+        lines.append(
+            "说明：motion 须为【动作】表中某一行的「标识名」，不得编造；当前包无表情资源，不要输出表情标识名或 #emotion# 行。"
+        )
+    else:
+        lines.append(
+            "说明：expression 与 motion 的值必须各为上表中某一行的「标识名」；不得编造表中不存在的名称，也不得留空（须从表中择一）。"
+        )
     return "\n".join(lines)
 
 

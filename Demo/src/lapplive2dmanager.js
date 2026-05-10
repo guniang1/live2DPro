@@ -224,7 +224,7 @@ export class LAppLive2DManager {
   };
 
   /**
-   * 根据 WebSocket 首条 chunk 的 expression / motion 标识驱动 Live2D（与后端 catalog 一致）。
+   * 根据 WebSocket ``live2d_tags`` 帧解析出的 expression / motion 标识驱动 Live2D（与后端 catalog 一致）。
    */
   applyChatLive2dActions(expression, motion) {
     const model = this._models.at(0);

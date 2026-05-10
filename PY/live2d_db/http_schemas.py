@@ -263,6 +263,7 @@ class RemindSchedulerScanNowPublic(BaseModel):
     claimed: int = 0
     delivered: int = 0
     released_no_ws: int = 0
+    stale_reclaimed: int = 0
 
 
 class OkRows(BaseModel):

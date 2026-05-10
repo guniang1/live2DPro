@@ -470,9 +470,10 @@ def mimo_tts(
     ``MIMO_USE_BEARER_AUTH=1`` 改用 ``Authorization: Bearer``。
 
     ``speech_assistant_only=True``：不把传入的导演/``MIMO_TTS_CONTEXT``/``MIMO_TTS_USER_PROMPT``
-    拼进 user（WebSocket 默认改为 **关闭** 此项并携带完整导演，见路由侧）；**user** 仅保留
-    ``MIMO_TTS_WS_USER_HINT``（若配置）。``merge_env_user_prompts=False`` 时忽略环境变量里的
-    CONTEXT/USER_PROMPT，以免与同一条请求里的 ``user_director_prompt`` 重复堆叠。
+    拼进 user；**user** 仅保留 ``MIMO_TTS_WS_USER_HINT``（若配置）。默认开启人设导演时
+    ``speech_assistant_only=False``；``router/wschat.py`` 对 MiMo 固定 ``merge_env_user_prompts=True``，
+    以便 ``CONTEXT``/``USER_PROMPT`` 与导演一并下发。``merge_env_user_prompts=False`` 时忽略环境变量里的
+    CONTEXT/USER_PROMPT（其它调用方可选）。
 
     文档: https://platform.xiaomimimo.com/docs/zh-CN/usage-guide/speech-synthesis-v2.5
 
@@ -493,7 +494,7 @@ def mimo_tts(
         不设则默认为「你是语音合成助手，请按照【人设】与【语气】合成语音。」
         ``MIMO_TTS_WS_USER_HINT``（仅在 ``speech_assistant_only=True`` 时生效）：写入 **user** 的固定短句，
         用于约束语气连贯（例如要求平稳、不要音效）；不传则 user 为空。
-        调用方传入的 ``user_director_prompt`` 与（默认可用的）CONTEXT / USER_PROMPT **按顺序拼接**
+        调用方传入的 ``user_director_prompt`` 与（``merge_env_user_prompts=True`` 时的）CONTEXT / USER_PROMPT **按顺序拼接**
         （导演指令在前）。``merge_env_user_prompts=False`` 时不拼环境变量段。
         发往 MiMo 的 user/assistant ``content`` 会 **压平换行**（``\\n``/``\\r`` 改为空格），避免长文本含段落分隔。
         ``MIMO_TTS_TIMEOUT``（单次 HTTP 超时秒数，默认 60；长句或 **音色克隆大包体**
@@ -873,7 +874,7 @@ def llm_to_tts_stream(
     text_language: str = "zh",
     chunk_tokens: int = 5,
     flush_mode: str = "punc",
-    speed: float = 1.15,
+    speed: float = 1.0,
     out_dir: Path | None = None,
     base: str | None = None,
 ) -> Generator[dict, None, None]:
@@ -952,7 +953,7 @@ def _is_wav_header(blob: bytes) -> bool:
 def run_tts_test(
     text: str | None = None,
     out_path: Path | None = None,
-    speed: float = 1.95,
+    speed: float = 1.0,
     base: str | None = None,
 ) -> Path:
     """请求一次合成并写入 WAV，供手动试听。"""
@@ -1003,8 +1004,8 @@ if __name__ == "__main__":
     p.add_argument(
         "--speed",
         type=float,
-        default=1.15,
-        help="语速倍率，1.0 为默认，>1 更快，<1 更慢",
+        default=1.0,
+        help="语速倍率，1.0 为默认（正常语速），>1 更快，<1 更慢",
     )
     p.add_argument("--stream", action="store_true", help="启用 LLM->TTS 流式模式")
     p.add_argument("--prompt", default="请用中文简短介绍一下你自己。", help="LLM 提示词")

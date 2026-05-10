@@ -194,6 +194,8 @@ class SpeechRecognizer {
     /** 发送 flush 并释放音频与 WebSocket */
     stop() {
         if (!this._isRecognizing && !this._ws) return;
+        // 先于 flush，避免关闭前仍有识别帧触发 onResult（例如用户已手动发送后重复投递）
+        this.onResult = null;
         try {
             if (this._ws && this._ws.readyState === WebSocket.OPEN) {
                 this._ws.send(JSON.stringify({ cmd: "flush" }));
@@ -202,7 +204,6 @@ class SpeechRecognizer {
         this._cleanupAudio();
         this._cleanupWs();
         this._isRecognizing = false;
-        this.onResult = null;
     }
 
     isRecognizingNow() {

@@ -20,7 +20,9 @@
       --accent-2: #a89888;
       --accent-soft: rgba(120, 105, 95, 0.14);
       --user-bubble: #e0dbd6;
-      --ai-bubble: #d8d4de;
+      --ai-bubble: #e2daf5;
+      --ai-bubble-text: #3d3558;
+      --ai-bubble-border: rgba(95, 65, 165, 0.24);
       --radius-lg: 18px;
       --radius-md: 14px;
       --shadow-panel: 0 0 0 1px var(--border-subtle), 0 12px 28px rgba(40, 38, 36, 0.06);
@@ -203,13 +205,59 @@
       border-bottom-right-radius: 6px;
     }
 
-    .chat-item.ai {
+    .chat-item.ai,
+    .chat-item.remind {
       align-self: flex-start;
-      color: #524c50;
-      background: var(--ai-bubble);
-      border: 1px solid rgba(90, 85, 95, 0.1);
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      min-width: 0;
+      color: var(--ai-bubble-text);
+      background: linear-gradient(145deg, #ebe4f8 0%, #e2daf5 48%, #d9cbf0 100%);
+      border: 1px solid var(--ai-bubble-border);
       border-bottom-left-radius: 6px;
-      box-shadow: 0 1px 6px rgba(40, 38, 45, 0.05);
+      box-shadow: 0 1px 6px rgba(75, 50, 130, 0.09);
+    }
+
+    /* 角色侧气泡：紫藤花图标（悬挂花序示意） */
+    .chat-item.ai::before,
+    .chat-item.remind::before {
+      content: "";
+      flex-shrink: 0;
+      width: 1.25em;
+      height: 1.35em;
+      margin-top: 2px;
+      background: url("data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2020%2024%22%20aria-hidden%3D%22true%22%3E%3Cpath%20stroke%3D%22%236b4eae%22%20stroke-width%3D%221.35%22%20stroke-linecap%3D%22round%22%20fill%3D%22none%22%20d%3D%22M10%202v4.5%22%2F%3E%3Cellipse%20cx%3D%227%22%20cy%3D%2210.5%22%20rx%3D%222.4%22%20ry%3D%223.4%22%20fill%3D%22%239580d9%22%20transform%3D%22rotate(-14%207%2010.5)%22%2F%3E%3Cellipse%20cx%3D%2213%22%20cy%3D%2211.5%22%20rx%3D%222.4%22%20ry%3D%223.4%22%20fill%3D%22%237c5dce%22%20transform%3D%22rotate(11%2013%2011.5)%22%2F%3E%3Cellipse%20cx%3D%229%22%20cy%3D%2216.5%22%20rx%3D%222.1%22%20ry%3D%223.1%22%20fill%3D%22%23b49cf0%22%20transform%3D%22rotate(-8%209%2016.5)%22%2F%3E%3Cellipse%20cx%3D%2212%22%20cy%3D%2218.5%22%20rx%3D%222.1%22%20ry%3D%223.1%22%20fill%3D%22%238562d8%22%20transform%3D%22rotate(9%2012%2018.5)%22%2F%3E%3C%2Fsvg%3E")
+        center / contain no-repeat;
+      opacity: 0.88;
+    }
+
+    .chat-item.ai.chat-item--waiting {
+      color: rgba(55, 48, 72, 0.72);
+      font-style: italic;
+    }
+
+    .chat-item--waiting .chat-waiting-label {
+      margin-right: 2px;
+    }
+
+    .chat-item--waiting .chat-waiting-dots {
+      display: inline-block;
+      animation: chat-waiting-dots 1.05s steps(4, end) infinite;
+      letter-spacing: 1px;
+      opacity: 0.85;
+    }
+
+    @keyframes chat-waiting-dots {
+      0%,
+      100% {
+        opacity: 0.35;
+        transform: translateY(0);
+      }
+      50% {
+        opacity: 1;
+        transform: translateY(-1px);
+      }
     }
 
     #live2d-panel {

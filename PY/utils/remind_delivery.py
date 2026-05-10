@@ -12,6 +12,7 @@
 
 系统提示要求当场口语、以情景与瞬时对话为主轴，可呼应关联单轮与人设/画像；输出 1～3 句中文；禁止 JSON/Markdown；约 800 字上限（代码侧超长截断加 ``…``）。
 模型 ``REMIND_DELIVERY_MODEL``（缺省同 ``OLLAMA_MODEL``）；可选 ``REMIND_DELIVERY_TEMPERATURE``、``REMIND_DELIVERY_NUM_PREDICT``。
+环境变量 ``REMIND_DELIVERY_USE_LLM`` 置 ``0``/``false``/``no``/``off`` 时不调用 Ollama；若情景、关联 ``session_id`` 对话块与 Redis 瞬时记忆三者皆空、Ollama 调用失败或剥离后正文为空，亦返回空串，由 ``wschat._deliver_remind_trigger_on_websocket`` 跳过下发。
 ``delivery_message`` 为生成稿；``trigger_content`` 与 REST 一致为库内情景原文。
 """
 
@@ -252,17 +253,6 @@ def _strip_trigger_type_brackets(s: str, trigger_type: str | None) -> str:
     return out
 
 
-def _fallback_line(t: RemindTrigger) -> str:
-    if not (t.trigger_type or "").strip():
-        return ""
-    s = (t.trigger_content or "").strip()
-    if s:
-        s = (s[:240] + "…") if len(s) > 240 else s
-    else:
-        s = "今天过得怎么样？过来陪你聊一会儿好吗？"
-    return _strip_trigger_type_brackets(s, t.trigger_type)
-
-
 def _strip_model_output(raw: str) -> str:
     s = (raw or "").strip()
     if not s:
@@ -286,21 +276,23 @@ def _strip_model_output(raw: str) -> str:
     return s
 
 
-def delivery_use_llm() -> bool:
-    return os.getenv("REMIND_DELIVERY_USE_LLM", "1").strip().lower() not in (
+def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
+    """结合情景描述、关联单轮、Redis 瞬时多轮对话与人设/画像，由 LLM 重新生成对用户展示的话术。"""
+    if not (t.trigger_type or "").strip():
+        return ""
+    llm_off = os.getenv("REMIND_DELIVERY_USE_LLM", "1").strip().lower() in (
         "0",
         "false",
         "no",
         "off",
     )
-
-
-def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
-    """结合情景描述、关联单轮、Redis 瞬时多轮对话与人设/画像，由 LLM 重新生成对用户展示的话术。"""
-    if not (t.trigger_type or "").strip():
+    if llm_off:
+        logger.info(
+            "关怀话术跳过：REMIND_DELIVERY_USE_LLM 已关闭 trigger_id=%s user_id=%s",
+            t.trigger_id,
+            t.user_id,
+        )
         return ""
-    if not delivery_use_llm():
-        return _fallback_line(t)
 
     scenario = (t.trigger_content or "").strip()
     session_text = _session_dialogue_prompt_block(t)
@@ -332,20 +324,30 @@ def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
             )
 
     if not scenario and not session_text and not memory_block:
-        return _fallback_line(t)
+        logger.info(
+            "关怀话术跳过：情景、关联对话与瞬时记忆均为空 trigger_id=%s user_id=%s",
+            t.trigger_id,
+            t.user_id,
+        )
+        return ""
 
     system = (
         "【绝对禁止】不许说「X分钟后我会……」「稍后我将……」「我等会儿……」；"
         "不许在输出里出现「【日常关怀】」「【生日】」等类型标签。\n"
         "此刻就是触发当下，直接对用户表达关心，就像朋友突然想起来搭一句话。\n\n"
-        "你是 Live2D 数字人。此刻请**重新撰写**你对用户**当场说出的一段台词**（就像真人刚好想起来搭一句话），"
+        "你是 Live2D 数字人，也就是**当前这个角色本人**，正在对用户直接开口说话。\n"
+        "**叙事视角**：全程用第一人称「我」对「你」讲，像在发语音/打字聊天；**禁止**小说旁白或第三者口吻描写你自己。"
+        "禁止出现「某某说道」「某某微笑着」「她的声音」「他叹了口气」以及用你自己的名字/外号做第三人称主语（例如「西奥她……」）；"
+        "不要先描写你再开口，**只要角色亲口说的话**。\n\n"
+        "此刻请**重新撰写**你对用户**当场说出的一段台词**（就像真人刚好想起来搭一句话），"
         "不是在播报定时任务、也不是客服工单。\n\n"
         "输入材料按顺序可能包含：【当前模型人设】（来自服务端 MySQL 人设表 persona，仅供语气与角色一致性）；【用户画像】（内部摘要，仅用于把握语气与关切点，勿背诵原文，"
         "勿对用户提「画像」「系统」「后台」）；【当前对话瞬时记忆】（与主对话同包分桶的 Redis 最近多轮原文，不含短期压缩摘要；"
         "可能比提醒创建时更新；若无则该段不出现）；【关怀类型】；【情景详细描述】（入库备忘，常含相对时间或草稿措辞，"
         "**不是**要你逐字念给用户听的台词）；【关联对话原文】（生成提醒那一轮的 user/assistant，若无有效绑定则正文为「未绑定」）。\n\n"
         "**主轴**：以「情景详细描述」与「当前对话瞬时记忆」为主组织语气与话题；可自然呼应「关联对话原文」以及人设、画像中的关切点。\n"
-        "**输出**：连续 1～3 句口语化中文，温暖自然；不要编造材料里不存在的事实；禁止 JSON、Markdown、项目符号列表。\n"
+        "**输出**：连续 1～3 句口语化中文，温暖自然，**仅为角色直接对用户说的话**；不要编造材料里不存在的事实；"
+        "禁止 JSON、Markdown、项目符号列表。\n"
         "**长度**：约 800 汉字以内；若自觉会超长则自行收束（服务端也会对过长输出截断）。\n\n"
         "勿嵌套复述情景里的整句草稿；勿照搬情景中带「N 分钟前/后」等易造成时间悖论的措辞；"
         "勿输出「定时关怀」「预约提醒」等机器话术。"
@@ -382,13 +384,18 @@ def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
             t.trigger_id,
             model,
         )
-        return _fallback_line(t)
+        return ""
 
     line = _strip_model_output(_ollama_message_content(r))
     line = _post_process_delivery(line)
     line = _strip_trigger_type_brackets(line, t.trigger_type)
     if not line:
-        return _fallback_line(t)
+        logger.info(
+            "关怀话术跳过：模型输出为空 trigger_id=%s user_id=%s",
+            t.trigger_id,
+            t.user_id,
+        )
+        return ""
     if len(line) > _MAX_OUT_CHARS:
         line = line[: _MAX_OUT_CHARS - 1].rstrip() + "…"
     logger.info(

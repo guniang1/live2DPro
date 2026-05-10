@@ -1,11 +1,13 @@
 """从单轮对话（用户输入 + 助手回复）抽取定时关怀条目，写入 ``remind_trigger``。
 
-在 ``/ws/chat`` 每轮落库后由后台线程调用；可通过环境变量关闭或换模型。
+在 ``/ws/chat`` 每轮落库后按需调用（默认 **每 2 轮对话抽取一次**，见 ``remind_extract_turn_should_run``）；
+可通过 ``REMIND_EXTRACT_EVERY_N_TURNS`` / ``REMIND_EXTRACT_FROM_DIALOGUE`` 等调整。
 抽取 LLM 所见的「当前时刻」先取 **Unix 时间戳** 再换算为本机本地 **``年月日:时分秒``** 字符串（与相对时间换算表同一格式），再写入 User 消息文首，便于模型推算 ``trigger_time``。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -19,7 +21,7 @@ import pymysql.err
 
 from live2d_db.connection import connection_ctx
 from live2d_db.db_config import DbConfig
-from live2d_db.entities import RemindTrigger
+from live2d_db.entities import Persona, RemindTrigger
 from live2d_db.memory_layers import (
     format_long_memory_block,
     read_instant_turns_chronological,
@@ -50,6 +52,73 @@ def _now_local_from_timestamp() -> datetime:
 def _format_datetime_for_extract_llm(dt: datetime) -> str:
     """传给抽取 LLM 的公历时间：``年月日:时分秒``（例如 ``2026年05月09日:14:30:45``），便于模型对齐中文语境。"""
     return dt.replace(microsecond=0).strftime("%Y年%m月%d日:%H:%M:%S")
+
+
+def _remind_extract_every_n_turns() -> int:
+    raw = (os.getenv("REMIND_EXTRACT_EVERY_N_TURNS") or "2").strip()
+    try:
+        return max(1, min(100, int(raw)))
+    except ValueError:
+        return 2
+
+
+def _remind_extract_turn_counter_ttl_sec() -> int:
+    raw = (os.getenv("REMIND_EXTRACT_TURN_CTR_TTL_SEC") or "604800").strip()
+    try:
+        return max(3600, min(86400 * 90, int(raw)))
+    except ValueError:
+        return 604800
+
+
+def remind_extract_turn_should_run(
+    user_id: int,
+    package_key: str | None,
+    ws_session_key: str,
+) -> bool:
+    """本轮结束后是否应触发关怀抽取。
+
+    默认 **每 N 轮**（``REMIND_EXTRACT_EVERY_N_TURNS``，缺省 **2**）执行一次：第 1 轮跳过，第 2、4、6… 轮执行。
+    计数按 ``user_id`` + 规范化 ``package_key`` + WebSocket ``session`` 分桶，存在 Redis；不可用时不节流（仍每轮抽取），以免丢提醒。
+    """
+    if user_id < 1:
+        return False
+    n = _remind_extract_every_n_turns()
+    if n <= 1:
+        return True
+    pkg = normalize_package_key((package_key or "").strip() or None, fallback="default")
+    sid = (ws_session_key or "").strip() or "default"
+    sid_fp = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:20]
+    cli = get_redis_client(logger)
+    if cli is None:
+        logger.debug(
+            "关怀抽取节流：Redis 不可用，按兼容策略本轮仍执行 user_id=%s pkg=%s",
+            user_id,
+            pkg,
+        )
+        return True
+    key = f"remind_extract:turn_ctr:{user_id}:{pkg}:{sid_fp}"
+    try:
+        c_raw = cli.incr(key)
+        c = int(c_raw)
+        if c == 1:
+            cli.expire(key, _remind_extract_turn_counter_ttl_sec())
+        ok = (c % n) == 0
+        if not ok:
+            logger.debug(
+                "关怀抽取节流跳过：计数=%s/%s user_id=%s pkg=%s",
+                c,
+                n,
+                user_id,
+                pkg,
+            )
+        return ok
+    except Exception:
+        logger.exception(
+            "关怀抽取节流计数失败，本轮仍执行抽取 user_id=%s pkg=%s",
+            user_id,
+            pkg,
+        )
+        return True
 
 
 def _enabled() -> bool:
@@ -367,28 +436,16 @@ def _long_memory_overview_for_package(
         return pkg_norm, ""
 
 
-def _persona_block_for_package(user_id: int, package_key: str) -> str:
-    """与聊天链路一致的包级人设（语气 + 角色设定），用于关怀话术风格。"""
+def _mysql_persona_row_for_package(user_id: int, package_key: str) -> Persona | None:
+    """从 MySQL ``persona`` 表解析当前用户 + 模型包的人设行（与 ``/ws/chat``、关怀投递同源）。"""
     if user_id < 1:
-        return ""
+        return None
     pkg = (package_key or "").strip()
     if not pkg:
-        return ""
+        return None
     try:
         with connection_ctx(DbConfig.from_env()) as conn:
-            row = PersonaRepository.resolve_persona_for_package(conn, user_id, pkg)
-        if row is None:
-            return ""
-        tone = (row.tone_style or "").strip()
-        desc = (row.character_desc or "").strip()
-        if not tone and not desc:
-            return ""
-        parts: list[str] = []
-        if tone:
-            parts.append(f"【语气风格】\n{tone}")
-        if desc:
-            parts.append(f"【角色设定】\n{desc}")
-        return _truncate_ctx("\n\n".join(parts), _REMIND_CTX_PERSONA_MAX)
+            return PersonaRepository.resolve_persona_for_package(conn, user_id, pkg)
     except pymysql.err.ProgrammingError as e:
         code = e.args[0] if e.args else None
         if code in (1146, 1054):
@@ -396,12 +453,33 @@ def _persona_block_for_package(user_id: int, package_key: str) -> str:
                 "关怀抽取读取人设跳过（persona 表或列不可用 errno=%s），仍可仅用记忆与对话生成文案",
                 code,
             )
-            return ""
+            return None
         logger.exception("关怀抽取读取人设失败 user_id=%s package=%s", user_id, pkg)
-        return ""
+        return None
     except Exception:
         logger.exception("关怀抽取读取人设失败 user_id=%s package=%s", user_id, pkg)
+        return None
+
+
+def _format_persona_block_from_row(row: Persona | None) -> str:
+    """将 persona 行格式化为抽取 LLM 可读块（语气 + 角色设定）。"""
+    if row is None:
         return ""
+    tone = (row.tone_style or "").strip()
+    desc = (row.character_desc or "").strip()
+    if not tone and not desc:
+        return ""
+    parts: list[str] = []
+    if tone:
+        parts.append(f"【语气风格】\n{tone}")
+    if desc:
+        parts.append(f"【角色设定】\n{desc}")
+    return _truncate_ctx("\n\n".join(parts), _REMIND_CTX_PERSONA_MAX)
+
+
+def _persona_block_for_package(user_id: int, package_key: str) -> str:
+    """包级人设正文（MySQL）；供仅需文本块的调用方。"""
+    return _format_persona_block_from_row(_mysql_persona_row_for_package(user_id, package_key))
 
 
 def _instant_memory_context_block(user_id: int, package_key: str) -> str:
@@ -421,7 +499,7 @@ def _instant_memory_context_block(user_id: int, package_key: str) -> str:
         if u:
             lines.append(f"用户：{u}")
         if a:
-            lines.append(f"助手：{a}")
+            lines.append(f"当前模型角色：{a}")
     return _truncate_ctx("\n".join(lines), _REMIND_CTX_INSTANT_MAX)
 
 
@@ -429,19 +507,37 @@ def _build_remind_extract_context(
     user_id: int, pkg_norm: str, period_overview: str
 ) -> str:
     blocks: list[str] = []
-    persona = _persona_block_for_package(user_id, pkg_norm)
+    persona_row = _mysql_persona_row_for_package(user_id, pkg_norm)
+    bind_lines = [
+        "【MySQL 当前人设绑定】（以下为服务端查询 ``persona`` 表结果，抽取时须以此为「当前数字人」依据）",
+        f"user_id={user_id}；规范化 package_key={pkg_norm}",
+    ]
+    if persona_row is None:
+        bind_lines.append(
+            "查询结果：该用户与本包无绑定人设行，或 persona 表不可用；"
+            "【语气风格】【角色设定】不会出现；trigger_content 中指涉角色时请仅用本轮用户明确使用的称呼，勿编造专名。"
+        )
+    else:
+        pid = persona_row.persona_id
+        pk_db = (persona_row.package_key or "").strip() or pkg_norm
+        bind_lines.append(
+            f"查询结果：已命中 persona_id={pid}；绑定 package_key={pk_db}。"
+            "紧随其后的【语气风格】【角色设定】均来自该 MySQL 行，与本轮「当前模型角色回复」为同一人。"
+        )
+    blocks.append("\n".join(bind_lines))
+    persona = _format_persona_block_from_row(persona_row)
     if persona:
-        blocks.append(f"【当前模型人设】\n{persona}")
+        blocks.append(f"【当前模型人设】{persona}")
     ov = (period_overview or "").strip()
     if ov:
         blocks.append(
-            "【长期记忆摘要】（long_memory 周期概要，仅供抽取参考；入库时将绑定本轮 chat_session.session_id）\n"
+            "【长期记忆摘要】"
             + ov
         )
     instant = _instant_memory_context_block(user_id, pkg_norm)
     if instant:
         blocks.append(
-            "【瞬时记忆】（Redis 中本会话近期轮次；若尚未写入本轮，以下一节「本轮对话」为准）\n"
+            "【瞬时记忆】"
             + instant
         )
     return "\n\n".join(blocks).strip()
@@ -594,7 +690,7 @@ def _call_extract_llm(
         "禁止无依据写成参考年的下一年（例如参考为 2026 却写 2027）。\n\n"
     )
     system = (
-        "你是信息抽取器。根据给定的一轮对话（用户与助手各一段），判断是否包含可以落实到具体日期或时间的"
+        "你是信息抽取器。根据给定的一轮对话（用户与「当前模型角色回复」各一段），判断是否包含可以落实到具体日期或时间的"
         "将来事项，用于数字人稍后主动关怀。\n\n"
         "规则：\n"
         "1. **trigger_type**（键名固定为 trigger_type，不要用 type/kind 代替）：仅当判断属于下面 **四类之一** 时才输出该条，"
@@ -612,11 +708,18 @@ def _call_extract_llm(
         "   绝对日期：用户说「今年 6 月 15 日」须用参考时间所在自然年；未提年份时用「即将到来」的那一次日期。\n"
         "8. trigger_content 填写「情景详细描述」：客观记录当时约定的时间点、事件、用户情绪与关键事实（若干句），"
         "用于系统在**触发当日**再结合该轮对话记录当场生成最终关怀话术；**不要**写成已经对用户念出口的台词式问候。"
-        "描述须与人设、长期记忆摘要及瞬时记忆一致，勿编造矛盾事实。\n\n"
+        "描述须与人设、长期记忆摘要及瞬时记忆一致，勿编造矛盾事实。\n"
+        "   **角色指称**：提到本轮对话里的数字人时，须与上文【当前模型人设】（角色设定、语气）或用户本轮明确使用的**专名**一致；"
+        "**禁止**单独写「助手」「AI」「虚拟助手」等泛指而不交代具体是谁（无人设专名时可用「当前对话中的 Live2D 角色」一次交代）。\n"
+        "   若用户口头里的「助手」与角色专名实为同一人（与人设、本轮「当前模型角色回复」一致），须在描述中**合并为一种称呼**，"
+        "**禁止**写成「西奥和助手」「喜欢某某和助手」这类易被理解成**两个不同主体**的并列。\n\n"
         '只输出一个 JSON 对象，格式严格为：{"reminders":[{"trigger_type":"...","trigger_time":"...","trigger_content":"..."}]} ；其中 trigger_content 为情景详细描述；'
     )
     prefix = (context_prefix or "").strip()
-    dialogue = f"【本轮对话】\n【用户】\n{user_input}\n\n【助手】\n{ai_reply}"
+    dialogue = (
+        f"【本轮对话】\n【用户】\n{user_input}\n\n"
+        f"【当前模型角色回复】（与本包【当前模型人设】为同一人，非第三者）\n{ai_reply}"
+    )
     user_block = ref_line + (f"{prefix}\n\n{dialogue}" if prefix else dialogue)
     opts: dict[str, Any] = {"num_predict": 2048, "temperature": 0.05, "format": "json"}
     cli = _ollama_client()

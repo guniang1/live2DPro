@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import IntEnum
 from typing import Optional
+
+
+class RemindDeliverOutcome(IntEnum):
+    """定时关怀 WebSocket 投递结果（用于决定是否将 is_triggered 置为 1）。"""
+
+    JSON_SENT = 1  # 已成功下发 remind_trigger JSON（含非空 delivery_message）
+    TRANSPORT_FAILED = 2  # 无在线连接或 JSON 发送失败
+    SKIPPED_NO_PAYLOAD = 3  # 未下发 JSON（类型为空或正文为空等）；占用应从 2 释放回 0，不得标为已触发
 
 
 @dataclass
@@ -76,6 +85,7 @@ class RemindTrigger:
     session_id: Optional[int] = None
     trigger_content: str = ""
     is_triggered: int = 0
+    delivery_started_at: Optional[datetime] = None
     create_time: Optional[datetime] = None
 
 

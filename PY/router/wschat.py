@@ -26,7 +26,7 @@ from utils.tts import (
 from live2d_db.connection import connection_ctx
 from live2d_db.package_key_util import normalize_package_key as _normalize_package_key_for_cache
 from live2d_db.db_config import DbConfig
-from live2d_db.entities import ChatSession, RemindTrigger
+from live2d_db.entities import ChatSession, RemindDeliverOutcome, RemindTrigger
 from live2d_db.long_memory_fields import (
     long_memory_has_any_content,
     merge_long_memory_record_for_prompt,
@@ -96,14 +96,12 @@ async def _try_send_bytes(websocket: WebSocket, data: bytes) -> bool:
 ollama_host = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 no_proxy = os.getenv("NO_PROXY", "127.0.0.1,localhost")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
-# 与聊天分离：专门从用户话中决策表情/动作标识名（可设为更小或更快的模型）
-OLLAMA_ACTION_MODEL = os.getenv("OLLAMA_ACTION_MODEL", OLLAMA_MODEL)
 
 os.environ["OLLAMA_HOST"] = ollama_host
 os.environ["NO_PROXY"] = no_proxy
 client = ollama.Client(host=ollama_host)
 logger.info(
-    f"✅ Ollama 客户端初始化成功，地址：{ollama_host}，聊天模型：{OLLAMA_MODEL}，动作/表情模型：{OLLAMA_ACTION_MODEL}"
+    f"✅ Ollama 客户端初始化成功，地址：{ollama_host}，聊天模型：{OLLAMA_MODEL}"
 )
 
 # 与 query ?session= 配对：TTS 与文本在 /ws/chat 同连接按序下发（见 chunk_audio）；/ws/tts 仅保留兼容
@@ -164,42 +162,47 @@ async def _deliver_remind_trigger_on_websocket(
     websocket: WebSocket,
     user_id: int,
     t: RemindTrigger,
-) -> bool:
+) -> RemindDeliverOutcome:
     """先按语境生成话术并下发 ``remind_trigger`` JSON；若已启用关怀 TTS 且合成成功，再下发 ``chunk_audio``（``remind_audio``）+ WAV。
 
     话术由 ``remind_delivery.generate_remind_delivery_message`` 综合库内情景、``session_id`` 单轮、
     Redis **瞬时**多轮对话（当前包，不含短期压缩层）、人设与用户画像等经 LLM **当场重写**；
+    若开关关闭、上下文不足以调用模型、Ollama 失败或输出为空则正文为空，本条跳过推送；
     朗读与主对话同源：``TTS_PROVIDER=mimo`` 时走 MiMo，否则在 GPT-SoVITS 参考音频齐全时走本地合成。
+
+    返回值用于数据库 ``is_triggered``：**仅**在已成功下发含非空 ``delivery_message`` 的 ``remind_trigger`` JSON 时为
+    ``RemindDeliverOutcome.JSON_SENT``（可选 TTS 帧失败不影响该结果）。
     """
     pkg = _live2d_package_from_websocket(websocket)
     from utils.remind_delivery import generate_remind_delivery_message
 
     if not (t.trigger_type or "").strip():
         logger.info(
-            "定时关怀跳过推送：trigger_type 为空 trigger_id=%s user_id=%s（自认领成功，不下发帧）",
+            "定时关怀跳过推送：trigger_type 为空 trigger_id=%s user_id=%s（不下发帧，不得标为已触发）",
             t.trigger_id,
             user_id,
         )
-        return True
+        return RemindDeliverOutcome.SKIPPED_NO_PAYLOAD
     display_line = await asyncio.to_thread(generate_remind_delivery_message, t, pkg)
     if not (display_line or "").strip():
         logger.info(
-            "定时关怀跳过推送：生成正文为空 trigger_id=%s user_id=%s（自认领成功，不下发帧）",
+            "定时关怀跳过推送：生成正文为空 trigger_id=%s user_id=%s（不下发帧，不得标为已触发）",
             t.trigger_id,
             user_id,
         )
-        return True
+        return RemindDeliverOutcome.SKIPPED_NO_PAYLOAD
     if not await _try_send_json(
         websocket, _remind_trigger_ws_payload(t, display_content=display_line)
     ):
-        return False
+        return RemindDeliverOutcome.TRANSPORT_FAILED
 
+    # 关怀正文 JSON 已送达；此后 TTS 仅为附加，失败不改变「已投递」语义
     if not _remind_trigger_use_tts():
-        return True
+        return RemindDeliverOutcome.JSON_SENT
 
     text = (display_line or "").strip()
     if not text:
-        return True
+        return RemindDeliverOutcome.JSON_SENT
 
     refer = await asyncio.to_thread(_load_tts_refer_runtime, user_id, pkg)
     wav: bytes = b""
@@ -225,7 +228,7 @@ async def _deliver_remind_trigger_on_websocket(
                 refer_runtime=refer,
                 user_director_prompt=mimo_director_user_prompt or None,
                 speech_assistant_only=not _inc_dir,
-                merge_env_user_prompts=not _inc_dir,
+                merge_env_user_prompts=True,
             )
         elif provider == "gpt_sovits":
             refer_ok = (
@@ -271,7 +274,7 @@ async def _deliver_remind_trigger_on_websocket(
         _cleanup_tts_refer_runtime(refer)
 
     if not wav:
-        return True
+        return RemindDeliverOutcome.JSON_SENT
 
     chunk_meta = {
         "type": "chunk_audio",
@@ -281,26 +284,39 @@ async def _deliver_remind_trigger_on_websocket(
         "remind_audio": True,
     }
     if not await _try_send_json(websocket, chunk_meta):
-        return True
+        logger.info(
+            "定时关怀 TTS 元数据帧发送失败（正文已下发）trigger_id=%s user_id=%s",
+            t.trigger_id,
+            user_id,
+        )
+        return RemindDeliverOutcome.JSON_SENT
     await _try_send_bytes(websocket, wav)
-    return True
+    return RemindDeliverOutcome.JSON_SENT
 
 
-async def broadcast_remind_trigger_to_user(user_id: int, t: RemindTrigger) -> bool:
-    """向该用户所有在线聊天连接广播定时场景推送（含可选 TTS 朗读）；无在线连接则返回 False。"""
+async def broadcast_remind_trigger_to_user(user_id: int, t: RemindTrigger) -> RemindDeliverOutcome:
+    """向该用户所有在线 ``/ws/chat`` 连接尝试投递；任一连线成功下发关怀 JSON 即视为 JSON_SENT。
+
+    无可用连接或全部发送失败返回 TRANSPORT_FAILED（保持待投递，用户上线后可补发）。
+    """
     async with _session_lock:
         conns = list(_chat_ws_by_user.get(user_id, []))
-    any_ok = False
+    outcomes: list[RemindDeliverOutcome] = []
     for ws in conns:
         if ws.client_state != WebSocketState.CONNECTED:
             continue
-        ok = await _deliver_remind_trigger_on_websocket(ws, user_id, t)
-        any_ok = any_ok or ok
-    return any_ok
+        outcomes.append(await _deliver_remind_trigger_on_websocket(ws, user_id, t))
+    if not outcomes:
+        return RemindDeliverOutcome.TRANSPORT_FAILED
+    if RemindDeliverOutcome.JSON_SENT in outcomes:
+        return RemindDeliverOutcome.JSON_SENT
+    if all(o == RemindDeliverOutcome.SKIPPED_NO_PAYLOAD for o in outcomes):
+        return RemindDeliverOutcome.SKIPPED_NO_PAYLOAD
+    return RemindDeliverOutcome.TRANSPORT_FAILED
 
 
 async def flush_pending_reminders_for_connection(websocket: WebSocket, user_id: int) -> None:
-    """连接建立后补发该用户已到期且尚未成功投递的提醒（与后台扫描共用认领语义）。"""
+    """连接建立后补发该用户已到期且尚未成功投递的提醒（认领 0→2；成功下发 JSON 后 2→1，否则 2→0）。"""
     before = datetime.now()
 
     def _list_u():
@@ -322,8 +338,18 @@ async def flush_pending_reminders_for_connection(websocket: WebSocket, user_id: 
         claimed = await asyncio.to_thread(_claim)
         if not claimed:
             continue
-        ok = await _deliver_remind_trigger_on_websocket(websocket, user_id, t)
-        if not ok:
+        outcome = await _deliver_remind_trigger_on_websocket(websocket, user_id, t)
+        if outcome == RemindDeliverOutcome.JSON_SENT:
+
+            def _finish():
+                with connection_ctx(DbConfig.from_env()) as conn:
+                    RemindTriggerRepository.finish_remind_delivery(conn, tid)
+
+            await asyncio.to_thread(_finish)
+        elif outcome in (
+            RemindDeliverOutcome.TRANSPORT_FAILED,
+            RemindDeliverOutcome.SKIPPED_NO_PAYLOAD,
+        ):
 
             def _release():
                 with connection_ctx(DbConfig.from_env()) as conn:
@@ -498,9 +524,9 @@ def _persist_raw_memory(
 
 def _tts_speed_default() -> float:
     try:
-        return float(os.getenv("TTS_SPEED", "1.25"))
+        return float(os.getenv("TTS_SPEED", "1.0"))
     except ValueError:
-        return 1.25
+        return 1.0
 
 
 def _mimo_ws_include_director_enabled() -> bool:
@@ -563,6 +589,31 @@ def _tts_flush_every_n_sentence_end() -> int:
     except ValueError:
         return 4
     return max(1, min(200, n))
+
+
+def _tts_stream_segment_mode() -> str:
+    """流式 TTS 切段策略。
+
+    - ``punctuation``（默认）：按标点 / ``TTS_FLUSH_EVERY_N_SENTENCE_END`` 攒批（原有行为）。
+    - ``chars``：按累计 Unicode 标量个数切段，**不等待标点**，便于测试「边出 token 边合成」。
+      阈值见 ``_tts_stream_flush_char_threshold()``。
+    """
+    raw = (os.getenv("TTS_STREAM_SEGMENT_MODE") or "").strip().lower()
+    if raw in ("chars", "char", "length", "fixed"):
+        return "chars"
+    return "punctuation"
+
+
+def _tts_stream_flush_char_threshold() -> int:
+    """``TTS_STREAM_SEGMENT_MODE=chars`` 时，buffer 达到多少字即送一次 TTS（合成仍走流水线队列，不阻塞收 token）。"""
+    raw = (os.getenv("TTS_STREAM_FLUSH_CHARS") or "").strip()
+    if raw == "":
+        return 16
+    try:
+        n = int(raw)
+    except ValueError:
+        return 16
+    return max(4, min(400, n))
 
 
 def _tts_parallel_workers() -> int:
@@ -664,19 +715,17 @@ def _redis_chat_history_max_messages() -> int:
 
 
 def _chat_system_prompt() -> str:
-    base = os.getenv(
+    """仅拼接非空环境变量 ``OLLAMA_CHAT_SYSTEM``、``OLLAMA_CHAT_OUTPUT_GUARD``、``OLLAMA_CHAT_REMIND_PREVIEW_BAN``；默认无代码内置话术。角色身份见会话中的【当前模型人设】。"""
+    parts: list[str] = []
+    for key in (
         "OLLAMA_CHAT_SYSTEM",
-        "你是友好的虚拟主播助手，用自然、口语化的中文与用户对话。",
-    )
-    guard = os.getenv(
         "OLLAMA_CHAT_OUTPUT_GUARD",
-        "输出要求：只回复对用户有帮助的正文内容，不要输出“情绪：xxx”或任何情绪标签行，不要自报系统设定。",
-    )
-    remind_preview_ban = (
-        "严禁预告「X分钟后我会对你说……」「我稍后会提醒你……」等说法；若要记录提醒，直接回复已记下即可，"
-        "不要描述自己将来的行为。"
-    )
-    return f"{base}\n{guard}\n{remind_preview_ban}"
+        "OLLAMA_CHAT_REMIND_PREVIEW_BAN",
+    ):
+        s = (os.getenv(key) or "").strip()
+        if s:
+            parts.append(s)
+    return "\n".join(parts)
 
 
 def _package_persona_chat_extra_sync(user_id: int, package_key: str) -> str:
@@ -746,7 +795,7 @@ def _scene_context_system_block(*, scene_location: str, scene_time: str) -> str:
     return (
         "【叙事与现实语境】\n"
         f"{summary}\n"
-        "说明：前者对应角色所处虚拟场景；后者为对谈发生时用户设备的本地时刻。"
+        "说明：前者为叙事里角色当下的地点或环境（与所选画面背景一致）；后者为对谈发生时用户设备的本地时刻。"
         "回复时请自然融入情境与时间感，不要生硬复述以上标签句。"
     )
 
@@ -758,7 +807,7 @@ def _chat_system_prompt_for_session(
     scene_location: str = "",
     scene_time: str = "",
 ) -> str:
-    """全局聊天设定 + 可选的「当前模型」人设（语气风格 + 角色设定）+ 用户画像 + 场景/时间。"""
+    """可选全局 env 片段 + 叙事语境 + 【当前模型人设】+ 用户画像。角色本体以前者人设表为准。"""
     base = _chat_system_prompt()
     if user_id < 1:
         return base
@@ -1090,6 +1139,73 @@ def _build_memory_for_model(
     return (out, short_plain)
 
 
+def _ollama_live2d_tags_model_name() -> str:
+    """专用表情/动作标签模型；默认与 ``OLLAMA_MODEL`` 相同，可用 ``OLLAMA_LIVE2D_TAGS_MODEL`` 单独指定更小模型。"""
+    m = (os.getenv("OLLAMA_LIVE2D_TAGS_MODEL") or "").strip()
+    return m if m else OLLAMA_MODEL
+
+
+def _live2d_tag_llm_user_content_sync(
+    user_id: int,
+    package_key: str,
+    user_message: str,
+    *,
+    scene_location: str = "",
+    scene_time: str = "",
+    max_instant_turns: int | None = None,
+) -> str:
+    """叙事语境 + 瞬时记忆 + 本轮用户句。角色人设已在专用标签模型的 system（``action_llm_parallel_full_system``）中给出。"""
+    parts: list[str] = []
+    _cap = max_instant_turns
+    if _cap is None:
+        try:
+            _cap = _memory_layers.instant_memory_max_turns()
+        except Exception:
+            _cap = 8
+    if user_id >= 1:
+        cli = _get_redis_client()
+        if cli is not None:
+            turns = _memory_layers.read_instant_turns_chronological(
+                cli, user_id, package_key
+            )
+            if len(turns) > _cap:
+                turns = turns[-_cap:]
+            lines: list[str] = []
+            for t in turns:
+                u = (t.get("u") or "").strip()
+                a = (t.get("a") or "").strip()
+                if u:
+                    lines.append(f"用户：{u}")
+                if a:
+                    lines.append(f"助手：{a}")
+            if lines:
+                parts.append(
+                    "【瞬时记忆】\n"
+                    "（Redis 瞬时多轮摘录，按时间顺序；与主对话模型所装配的瞬时轮同源，不含短期/长期记忆全文。）\n"
+                    + "\n".join(lines)
+                )
+            else:
+                parts.append(
+                    "【瞬时记忆】\n（当前尚无已缓存的多轮摘录；请主要依据【本轮用户输入】与人设选型。）"
+                )
+        else:
+            parts.append(
+                "【瞬时记忆】\n（Redis 不可用，无法读取瞬时轮；请主要依据【本轮用户输入】与人设选型。）"
+            )
+    else:
+        parts.append(
+            "【瞬时记忆】\n（访客模式：无用户维度瞬时缓存；请主要依据【本轮用户输入】与人设选型。）"
+        )
+    scene_blk = _scene_context_system_block(
+        scene_location=scene_location, scene_time=scene_time
+    )
+    if scene_blk:
+        parts.append(scene_blk)
+    parts.append("【本轮用户输入】\n" + (user_message or "").strip())
+    parts.append("请严格按 system 要求仅输出两行标签，不要输出其它文字。")
+    return "\n\n".join(parts)
+
+
 def _append_turn_memory_layers(
     user_id: int,
     package_key: str,
@@ -1146,18 +1262,39 @@ def _append_turn_to_redis_history(
                 )
 
 
-def ollama_chat_stream_options() -> dict:
-    """默认不限制生成长度（不传 num_predict）；仅当设置 OLLAMA_NUM_PREDICT 时作为上限。"""
-    raw = (os.getenv("OLLAMA_NUM_PREDICT") or "").strip()
-    if raw == "":
-        return {}
-    try:
-        n = int(raw)
-    except ValueError:
-        return {}
-    if n <= 0:
-        return {}
-    return {"num_predict": max(64, min(32768, n))}
+def ollama_chat_stream_options(*, for_live2d_tags: bool = False) -> dict:
+    """主对话流式与 Live2D 标签请求共用的 Ollama ``options``。
+
+    - ``OLLAMA_NUM_PREDICT``：二者皆可（未设置则不限制）。
+    - ``OLLAMA_CHAT_TEMPERATURE`` / ``OLLAMA_CHAT_TOP_P``：**仅主对话**（``for_live2d_tags=False``），避免抬高标签两行输出的随机性。
+    """
+    opts: dict = {}
+    raw_np = (os.getenv("OLLAMA_NUM_PREDICT") or "").strip()
+    if raw_np:
+        try:
+            n = int(raw_np)
+            if n > 0:
+                opts["num_predict"] = max(64, min(32768, n))
+        except ValueError:
+            pass
+    if not for_live2d_tags:
+        raw_t = (os.getenv("OLLAMA_CHAT_TEMPERATURE") or "").strip()
+        if raw_t:
+            try:
+                t = float(raw_t)
+                if 0.0 <= t <= 2.0:
+                    opts["temperature"] = t
+            except ValueError:
+                pass
+        raw_p = (os.getenv("OLLAMA_CHAT_TOP_P") or "").strip()
+        if raw_p:
+            try:
+                p = float(raw_p)
+                if 0.0 < p <= 1.0:
+                    opts["top_p"] = p
+            except ValueError:
+                pass
+    return opts
 
 
 def iter_tokens(text: str):
@@ -1174,7 +1311,7 @@ def ollama_chat_messages(
     scene_location: str = "",
     scene_time: str = "",
 ) -> list[dict]:
-    """聊天消息：system 固定首条，历史按 user/assistant 交替，末尾追加本轮 user。"""
+    """聊天消息：system 固定首条，历史按 user/assistant 交替，末尾追加本轮 user。（Live2D 标签由独立模型负责，不拼入本条 system。）"""
     sys_content = (
         _chat_system_prompt_for_session(
             user_id,
@@ -1213,6 +1350,18 @@ def ollama_message_content(resp: object) -> str:
     return str(c).strip() if c is not None else ""
 
 
+def _skip_expression_fallback_candidate(name: str) -> bool:
+    """排除名称明显属于动作预设行的条目，避免误当作默认表情。"""
+    s = (name or "").strip()
+    if not s:
+        return True
+    if "动作预设" in s:
+        return True
+    if s.startswith("【动作"):
+        return True
+    return False
+
+
 def fallback_expression_if_empty(ne: list[str]) -> str:
     """单侧缺表情时回退：优先 LIVE2D_FALLBACK_EXPRESSION，否则优先首字符非数字的标识（常见配件层以 1/2 开头）。"""
     if not ne:
@@ -1227,7 +1376,10 @@ def fallback_expression_if_empty(ne: list[str]) -> str:
         if got:
             return got
     for n in ne:
-        if n and not n[0].isdigit():
+        if n and not n[0].isdigit() and not _skip_expression_fallback_candidate(n):
+            return n
+    for n in ne:
+        if n and not _skip_expression_fallback_candidate(n):
             return n
     return ne[0]
 
@@ -1250,210 +1402,127 @@ def fallback_motion_if_empty(nm: list[str]) -> str:
     return nm[0]
 
 
-def parse_action_json(text: str, cat) -> tuple[str, str, str | None]:
-    """解析动作 LLM 返回的 JSON；返回 (expression, motion, reason)。"""
-    text = (text or "").strip()
-    if not text:
-        return "", "", None
-    if "```" in text:
-        parts = text.split("```")
-        for p in parts:
-            p = p.strip()
-            if p.startswith("json"):
-                p = p[4:].strip()
-            if p.startswith("{"):
-                text = p
+LIVE2D_EMOTION_TAG = "#emotion#"
+LIVE2D_MOTION_TAG = "#motion#"
+
+
+class Live2dTagLineStripper:
+    """流式按行剥离正文里的 #emotion# / #motion#（主对话不应输出；保留防御性剥离）；可见正文立即下发。"""
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self.prefix_emotion_raw = ""
+        self.prefix_motion_raw = ""
+        self._emo_pick = ""
+        self._mot_pick = ""
+        self._pending_send: list[tuple[str, str]] = []
+
+    def pop_pending_raw_tags(self) -> list[tuple[str, str]]:
+        """返回并清空本轮累积的 (\"emotion\"|\"motion\", raw_value) 队列。"""
+        p = self._pending_send
+        self._pending_send = []
+        return p
+
+    def _queue_tag_line(self, stripped: str) -> bool:
+        sl = stripped.lower()
+        if sl.startswith(LIVE2D_EMOTION_TAG.lower()):
+            raw = stripped[len(LIVE2D_EMOTION_TAG) :].strip()
+            self._emo_pick = raw
+            self.prefix_emotion_raw = raw
+            self._pending_send.append(("emotion", raw))
+            return True
+        if sl.startswith(LIVE2D_MOTION_TAG.lower()):
+            raw = stripped[len(LIVE2D_MOTION_TAG) :].strip()
+            self._mot_pick = raw
+            self.prefix_motion_raw = raw
+            self._pending_send.append(("motion", raw))
+            return True
+        return False
+
+    def _should_hold_tail(self, tail: str) -> bool:
+        """行未完且可能是 #emotion# / #motion# 的前缀时暂不下发，避免误送进 TTS。"""
+        if not tail:
+            return False
+        s = tail.lstrip("\r\n \t")
+        if not s:
+            return False
+        low = s.lower()
+        if not low.startswith("#"):
+            return False
+        em = LIVE2D_EMOTION_TAG.lower()
+        mt = LIVE2D_MOTION_TAG.lower()
+        for tag in (em, mt):
+            if len(low) <= len(tag) and tag.startswith(low):
+                return True
+            if low.startswith(tag):
+                return True
+        return False
+
+    def _consume_complete_line(self, line: str) -> str | None:
+        s = line.strip()
+        if not s:
+            return line + "\n"
+        if self._queue_tag_line(s):
+            return None
+        return line + "\n"
+
+    def feed(self, piece: str) -> str:
+        self._buf += piece
+        parts: list[str] = []
+        while True:
+            nl = self._buf.find("\n")
+            if nl < 0:
                 break
-    lo = text.find("{")
-    hi = text.rfind("}")
-    blob = text[lo : hi + 1] if lo >= 0 and hi > lo else ""
-    obj: dict | None = None
-    if blob:
-        try:
-            parsed = json.loads(blob)
-            obj = parsed if isinstance(parsed, dict) else None
-        except json.JSONDecodeError:
-            obj = None
-    if obj is None:
-        m_exp = re.search(r'"expression"\s*:\s*"([^"]*)"', text)
-        m_mot = re.search(r'"motion"\s*:\s*"([^"]*)"', text)
-        m_rea = re.search(r'"reason"\s*:\s*"([^"]*)"', text)
-        if m_exp or m_mot:
-            obj = {
-                "expression": m_exp.group(1) if m_exp else "",
-                "motion": m_mot.group(1) if m_mot else "",
-            }
-            if m_rea:
-                obj["reason"] = m_rea.group(1)
-    if obj is None:
-        return "", "", None
+            line = self._buf[:nl].rstrip("\r")
+            self._buf = self._buf[nl + 1 :]
+            vis = self._consume_complete_line(line)
+            if vis:
+                parts.append(vis)
+        tail = self._buf
+        if tail and not self._should_hold_tail(tail):
+            parts.append(tail)
+            self._buf = ""
+        return "".join(parts)
 
-    def _get_reason(o: dict) -> str | None:
-        for k in ("reason", "理由", "说明", "分析"):
-            if k in o and o[k] is not None:
-                s = str(o[k]).strip()
-                if s:
-                    return s[:1200]
-        return None
-
-    reason = _get_reason(obj)
-
-    exp_set = frozenset(cat.expression_names)
-    mot_set = frozenset(cat.motion_names)
-
-    def _get_expr(o: dict) -> object:
-        for k in ("expression", "表情", "exp", "face"):
-            if k in o and o[k] is not None:
-                return o[k]
-        return None
-
-    def _get_mot(o: dict) -> object:
-        for k in ("motion", "动作", "mtn", "anim"):
-            if k in o and o[k] is not None:
-                return o[k]
-        return None
-
-    def _pick_expr(val) -> str:
-        s = normalize_expression_pick(val)
-        return resolve_expression_id(s, exp_set)
-
-    def _pick_mot(val) -> str:
-        s = normalize_motion_pick(val)
-        return resolve_motion_id(s, mot_set)
-
-    expr_raw = _get_expr(obj)
-    mot_raw = _get_mot(obj)
-    ex = _pick_expr(expr_raw)
-    mo = _pick_mot(mot_raw)
-    if ex or mo:
-        return ex, mo, reason
-    # 模型常把「动作名」填进 expression、或两键整体对调：用另一键再解一次
-    ex_sw = _pick_expr(mot_raw)
-    mo_sw = _pick_mot(expr_raw)
-    return ex_sw, mo_sw, reason
+    def end(self) -> str:
+        tail = self._buf
+        self._buf = ""
+        if not tail:
+            return ""
+        s = tail.strip()
+        if s and self._queue_tag_line(s):
+            return ""
+        return tail
 
 
-# --- 动作/表情 LLM（OLLAMA_ACTION_MODEL）上下文 ---------------------------------
-# user 侧：人设(MySQL _package_persona_chat_extra_sync) + 瞬时(Redis read_instant_turns_chronological)
-# + 本轮输入；多段时文首【选题对象】强调 expression/motion 归属 Live2D 虚拟角色（助手），非真人用户。
-# system：catalog.action_llm_system_text + 选型对象为角色的追加句。不注入主对话短期/长期 system 块。
-# ------------------------------------------------------------------------------
-
-def _format_instant_turns_for_action_llm(
-    turns: list[dict[str, str]],
-    *,
-    per_line_max: int = 420,
-    total_max: int = 2600,
-) -> str:
-    """将瞬时记忆轮次格式化为动作模型的可读上下文（时间正序）。"""
-    if not turns:
-        return ""
-    lines: list[str] = []
-    for i, t in enumerate(turns, start=1):
-        u = _truncate_mysql_text((t.get("u") or "").strip(), per_line_max)
-        a = _truncate_mysql_text((t.get("a") or "").strip(), per_line_max)
-        if u:
-            lines.append(f"第{i}轮 用户：{u}")
-        if a:
-            lines.append(f"第{i}轮 助手：{a}")
-    blob = "\n".join(lines).strip()
-    if len(blob) > total_max:
-        blob = blob[-total_max:].lstrip()
-        blob = "…（更早对话已省略）\n" + blob
-    return blob
-
-
-def _action_llm_user_content_sync(user_id: int, package_key: str, user_message: str) -> str:
-    """为人设 + 瞬时记忆 + 本轮输入；未登录或与主对话一致地退化为仅本轮句子。"""
-    um = (user_message or "").strip()
-    if user_id < 1:
-        return um
-    pkg = (package_key or "").strip()
-    if not pkg:
-        return um
-    persona = _package_persona_chat_extra_sync(user_id, pkg)
-    instant_blob = ""
-    cli = _get_redis_client()
-    if cli is not None:
-        instant_blob = _format_instant_turns_for_action_llm(
-            _memory_layers.read_instant_turns_chronological(cli, user_id, pkg)
-        )
-    blocks: list[str] = []
-    if persona.strip():
-        blocks.append("【人设参考】\n" + persona.strip())
-    if instant_blob:
-        blocks.append("【最近对话（瞬时记忆）】\n" + instant_blob)
-    blocks.append("【本轮用户输入】\n" + um)
-    body = "\n\n".join(blocks)
-    # 与仅单句输入区分：多段上下文下强调选型对象是 Live2D 角色，不是用户
-    if persona.strip() or instant_blob:
-        return (
-            "【选题对象】以下为会话上下文；你要输出的是 **Live2D 虚拟角色（助手）** 应切换到的表情与动作资源，"
-            "用于表现该**角色**对谈话的反应；不要当成用户本人的表情或动作。\n\n"
-            + body
-        )
-    return body
-
-
-def _infer_expression_motion(
-    user_message: str,
+def _expression_motion_from_tag_picks(
+    emotion_raw: str,
+    motion_raw: str,
     cat,
-    *,
-    user_id: int = 0,
-    package_key: str = "",
 ) -> tuple[str, str]:
-    """动作 LLM（非流式）：返回 (expression, motion)。
-
-    已登录且带上 package_key 时，user 侧会注入 MySQL 人设与 Redis 瞬时对话，与主对话模型一致。
-    """
-    action_user_content = _action_llm_user_content_sync(user_id, package_key, user_message)
-    action_system_text = (
-        cat.action_llm_system_text
-        + "你要为 **Live2D 虚拟角色（助手）** 选型：依据人设、瞬时记忆中的情境与用户本轮输入，"
-        "结合该**角色**的性格与会话氛围，选出角色此刻应表现的表情与动作；勿替真人用户选型。"
-        + "表情只能从给定表情列表里选，动作只能从给定动作列表里选。"
-        + "输出严格JSON，只返回 expression、motion、reason。"
-    )
-    action_opts: dict = {
-        "num_predict": 512,
-        "temperature": 0.1,
-        "format": "json",
-    }
-    try:
-        r = client.chat(
-            model=OLLAMA_ACTION_MODEL,
-            messages=[
-                {"role": "system", "content": action_system_text},
-                {"role": "user", "content": action_user_content},
-            ],
-            options=action_opts,
-        )
-    except Exception as e1:
-        logger.warning("动作/表情 LLM（format=json）失败，将重试无 format: %s", e1)
-        try:
-            r = client.chat(
-                model=OLLAMA_ACTION_MODEL,
-                messages=[
-                    {"role": "system", "content": action_system_text},
-                    {"role": "user", "content": action_user_content},
-                ],
-                options={"num_predict": 512, "temperature": 0.1},
-            )
-        except Exception as e2:
-            logger.warning("动作/表情 LLM 调用失败: %s", e2)
-            return "", ""
-    try:
-        raw = ollama_message_content(r)
-    except Exception as e:
-        logger.warning("动作/表情 LLM 响应解析失败: %s", e)
-        return "", ""
-    if not raw:
-        logger.warning("动作/表情 LLM 返回空文本，请检查 Ollama 与模型 %s", OLLAMA_ACTION_MODEL)
-        return "", ""
-    ex, mo, llm_reason = parse_action_json(raw, cat)
-    parsed_ex, parsed_mo = ex, mo
+    """将标签内的选型字符串映射为 catalog 标识名，并套用缺省回退。"""
+    er = (emotion_raw or "").strip()
+    mr = (motion_raw or "").strip()
     ne, nm = cat.expression_names, cat.motion_names
-    fb_on = os.getenv("LIVE2D_ACTION_FALLBACK_IF_EMPTY", "1").lower() in ("1", "true", "yes", "")
+    exp_set = frozenset(ne)
+    mot_set = frozenset(nm)
+    ex = (
+        resolve_expression_id(normalize_expression_pick(er), exp_set)
+        if er
+        else ""
+    )
+    mo = (
+        resolve_motion_id(normalize_motion_pick(mr), mot_set)
+        if mr
+        else ""
+    )
+    parsed_ex, parsed_mo = ex, mo
+    fb_on = os.getenv("LIVE2D_ACTION_FALLBACK_IF_EMPTY", "1").lower() in (
+        "1",
+        "true",
+        "yes",
+        "",
+    )
     before = (ex, mo)
 
     if fb_on:
@@ -1463,25 +1532,28 @@ def _infer_expression_motion(
             if nm:
                 mo = fallback_motion_if_empty(nm)
         else:
-            # 仅一侧有值时补全另一侧（仍须两边都有有效标识）
             if ex == "" and ne:
                 ex = fallback_expression_if_empty(ne)
             if mo == "" and nm:
                 mo = fallback_motion_if_empty(nm)
 
-    if ex == "" and mo == "":
+    if ex == "" and mo == "" and (er or mr):
         logger.warning(
-            "动作/表情 解析后均为空（回退后仍无可用项或 catalog 为空），原始输出(前600字): %s",
-            raw[:600].replace("\n", "\\n"),
+            "Live2D 标签选型无法落入 catalog（回退后仍空），emotion=%r motion=%r",
+            er[:200],
+            mr[:200],
+        )
+    if not er and not mr and fb_on and (ex or mo):
+        logger.info(
+            "Live2D：本轮助手未输出可用的 #emotion# / #motion# 标签行，expression/motion 仅来自 catalog 回退；"
+            "若需稳定选型请在回复末尾写上两行标签。"
         )
     fb_applied = (ex, mo) != before and (ex or mo)
     fb_note = f"是 前态={before!r}" if fb_applied else "否"
-    reason_snip = (llm_reason or "(JSON 中无 reason/理由 等字段或为空)")[:600]
     logger.info(
-        "动作/表情 模型=%s | 原始=%r | 理由=%r | 解析 exp=%r mot=%r | 最终 exp=%r mot=%r | 单侧补全回退=%s",
-        OLLAMA_ACTION_MODEL,
-        raw.strip().replace("\n", " ")[:500],
-        reason_snip,
+        "Live2D 标签 | raw_emotion=%r raw_motion=%r | 解析 exp=%r mot=%r | 最终 exp=%r mot=%r | 单侧补全回退=%s",
+        er,
+        mr,
         parsed_ex,
         parsed_mo,
         ex,
@@ -1491,18 +1563,152 @@ def _infer_expression_motion(
     return ex, mo
 
 
-def _chunk_json(
-    content: str,
+def _resolve_emotion_from_raw(er: str, cat) -> str:
+    er = (er or "").strip()
+    ne = cat.expression_names
+    if not er:
+        return ""
+    ex = resolve_expression_id(
+        normalize_expression_pick(er), frozenset(ne)
+    )
+    fb_on = os.getenv("LIVE2D_ACTION_FALLBACK_IF_EMPTY", "1").lower() in (
+        "1",
+        "true",
+        "yes",
+        "",
+    )
+    if ex == "" and fb_on and ne:
+        ex = fallback_expression_if_empty(ne)
+    if ex == "" and er:
+        logger.warning(
+            "Live2D：表情标签值无法落入 catalog，raw=%r",
+            er[:200],
+        )
+    return ex
+
+
+def _resolve_motion_from_raw(mr: str, cat) -> str:
+    mr = (mr or "").strip()
+    nm = cat.motion_names
+    if not mr:
+        return ""
+    mo = resolve_motion_id(normalize_motion_pick(mr), frozenset(nm))
+    fb_on = os.getenv("LIVE2D_ACTION_FALLBACK_IF_EMPTY", "1").lower() in (
+        "1",
+        "true",
+        "yes",
+        "",
+    )
+    if mo == "" and fb_on and nm:
+        mo = fallback_motion_if_empty(nm)
+    # 无动作资源的模型：motion 允留空，不因标签模型误输出而告警
+    if mo == "" and mr and nm and not fb_on:
+        logger.warning(
+            "Live2D：动作标签值无法落入 catalog，raw=%r（已关闭 LIVE2D_ACTION_FALLBACK_IF_EMPTY，未执行默认动作回退）",
+            mr[:200],
+        )
+    return mo
+
+
+def _format_resolved_live2d_tag_line(kind: str, raw: str, cat) -> str | None:
+    if kind == "emotion":
+        r = _resolve_emotion_from_raw(raw, cat)
+        return f"{LIVE2D_EMOTION_TAG}{r}" if r else None
+    if kind == "motion":
+        r = _resolve_motion_from_raw(raw, cat)
+        return f"{LIVE2D_MOTION_TAG}{r}" if r else None
+    return None
+
+
+def _parse_live2d_tag_lines_from_llm_output(text: str) -> tuple[str, str]:
+    """从专用标签模型的整段输出中取出 emotion/motion 原始选型串（允许多余行，按行匹配）。"""
+    emo_raw, mot_raw = "", ""
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low.startswith(LIVE2D_EMOTION_TAG.lower()):
+            emo_raw = s[len(LIVE2D_EMOTION_TAG) :].strip()
+        elif low.startswith(LIVE2D_MOTION_TAG.lower()):
+            mot_raw = s[len(LIVE2D_MOTION_TAG) :].strip()
+    return emo_raw, mot_raw
+
+
+async def _emit_live2d_tags_parallel_llm(
     *,
-    expression: str | None = None,
-    motion: str | None = None,
-) -> dict:
-    """流式 chunk。动作 LLM 非流式生成的 expression/motion 只拼入第一条聊天 chunk，之后仅 content。"""
-    out: dict = {"type": "chunk", "content": content}
-    if expression is not None and motion is not None:
-        out["expression"] = expression
-        out["motion"] = motion
-    return out
+    websocket: WebSocket,
+    chat_session: str,
+    chat_user_id: int,
+    package_key: str,
+    catalog,
+    user_message: str,
+    scene_location: str,
+    scene_time: str,
+    invalid_check,
+    sent_flag: dict[str, bool],
+) -> None:
+    """专用表情/动作模型：非流式一次调用，完成后即发 ``live2d_tags``；与主流式并行，不占 chunk。"""
+    model = _ollama_live2d_tags_model_name()
+    if not model:
+        return
+
+    persona = _package_persona_chat_extra_sync(chat_user_id, package_key)
+
+    def _sync_chat() -> str:
+        msgs = [
+            {
+                "role": "system",
+                "content": catalog.action_llm_parallel_full_system(persona),
+            },
+            {
+                "role": "user",
+                "content": _live2d_tag_llm_user_content_sync(
+                    chat_user_id,
+                    package_key,
+                    user_message,
+                    scene_location=scene_location,
+                    scene_time=scene_time,
+                ),
+            },
+        ]
+        kw: dict = {"model": model, "messages": msgs, "stream": False}
+        opts = ollama_chat_stream_options(for_live2d_tags=True)
+        if opts:
+            kw["options"] = opts
+        resp = client.chat(**kw)
+        return ollama_message_content(resp)
+
+    try:
+        raw = await asyncio.to_thread(_sync_chat)
+    except Exception:
+        logger.exception(
+            "Live2D 专用标签模型调用失败 session=%s user_id=%s model=%s",
+            chat_session,
+            chat_user_id,
+            model,
+        )
+        return
+
+    emo_raw, mot_raw = _parse_live2d_tag_lines_from_llm_output(raw)
+    if await invalid_check():
+        return
+    if websocket.client_state != WebSocketState.CONNECTED:
+        return
+    for kind, raw_val in (("emotion", emo_raw), ("motion", mot_raw)):
+        line = _format_resolved_live2d_tag_line(kind, raw_val, catalog)
+        if not line:
+            continue
+        ok = await _try_send_json(
+            websocket,
+            {"type": "live2d_tags", "text": line},
+        )
+        if ok:
+            sent_flag["sent"] = True
+
+
+def _chunk_json(content: str) -> dict:
+    return {"type": "chunk", "content": content}
 
 
 async def _send_catalog(websocket: WebSocket, cat) -> None:
@@ -1521,8 +1727,8 @@ WebSocket 聊天接口
 响应格式：
     - 连接后首条：{"type": "catalog", "package_key": "...", "expression": [...], "motion": [...],
       "expression_paths": [...], "motion_paths": [...]}（各一条，与 LLM 可选范围一致）
-    - 流式内容（未配置音色参考时）：首条 chunk 可带 ``expression``/``motion``，后续 chunk 仅 ``content`` 文本增量。
-    - 流式内容（``TTS_PROVIDER=mimo`` 且已配置 ``MIMO_API_KEY``，或已配置 GPT-SoVITS 参考音频时）：默认按 **标点攒批**（``TTS_FLUSH_EVERY_N_SENTENCE_END``，默认每 4 个标点一次合成）下发 ``{"type":"chunk_audio",...}``（首条可带 ``expression``/``motion``），**紧接**一条二进制 WAV；合成完成后才推送该段文本与音频。**流水线**：攒满一段即入队，**不等待**该段合成结束即可继续收 token 攒下一段；并行合成路数由 ``TTS_STREAM_PIPELINE_SLOTS``（优先）或 ``TTS_PARALLEL_WORKERS`` / ``TTS_PARALLEL_WORKERS_MIMO`` 决定，前端仍 **按 segment index 递增** 收音频。MiMo 音色克隆可按批重复上传参考音频；若希望整轮只请求一次云端合成，设 ``MIMO_TTS_WS_SINGLE_SHOT=1``（全文结束后单次 ``chunk_audio``）。MiMo 默认附带 **导演指令**（仅 MySQL 人设：``character_desc`` / ``tone_style``，对应【人设】【语气】）；``MIMO_TTS_WS_INCLUDE_DIRECTOR=0`` 可关。
+    - 流式正文（未配置音色参考时）：主对话模型 **不**输出 ``#emotion#`` / ``#motion#``；若流中偶发出现标签行仍会被剥离（防御性）。专用标签模型（``OLLAMA_LIVE2D_TAGS_MODEL``，未设则同 ``OLLAMA_MODEL``）另请求一次，仅输出两行标签，解析后以 ``{"type":"live2d_tags","text":"#emotion#…"}`` / ``#motion#…`` 下发（catalog 规范化后标识名），**不阻塞**主流式与 TTS。
+    - 流式内容（``TTS_PROVIDER=mimo`` 且已配置 ``MIMO_API_KEY``，或已配置 GPT-SoVITS 参考音频时）：默认按 **标点攒批**（``TTS_FLUSH_EVERY_N_SENTENCE_END``，默认每 4 个标点一次合成）下发 ``{"type":"chunk_audio",...}``，**紧接**一条二进制 WAV；**正文与 TTS 不等待** Live2D 标签行（标签在流中靠后到达时单独 ``live2d_tags`` 推送）。**流水线**：攒满一段即入队，**不等待**该段合成结束即可继续收 token 攒下一段；并行合成路数由 ``TTS_STREAM_PIPELINE_SLOTS``（优先）或 ``TTS_PARALLEL_WORKERS`` / ``TTS_PARALLEL_WORKERS_MIMO`` 决定，前端仍 **按 segment index 递增** 收音频。可选 **按字数切段**（测试「边出 token 边合成」、不依赖标点）：设 ``TTS_STREAM_SEGMENT_MODE=chars``，并用 ``TTS_STREAM_FLUSH_CHARS``（默认 16）控制每段长度。MiMo 音色克隆可按批重复上传参考音频；若希望整轮只请求一次云端合成，设 ``MIMO_TTS_WS_SINGLE_SHOT=1``（全文结束后单次 ``chunk_audio``）。MiMo 默认附带 **导演指令**（仅 MySQL 人设：``character_desc`` / ``tone_style``，对应【人设】【语气】）；对本路由的 MiMo 调用固定 ``merge_env_user_prompts=True``，故 ``MIMO_TTS_CONTEXT`` / ``MIMO_TTS_USER_PROMPT`` 会在附带导演时一并写入云端 **user**；``MIMO_TTS_WS_INCLUDE_DIRECTOR=0`` 可关导演（此时仅 ``MIMO_TTS_WS_USER_HINT`` 等）。
     - 完成标记：{"type": "done"}
     - 错误信息：{"type": "error", "message": "错误描述"}
     - 定时场景（生日、纪念日、考试等）：``{"type":"remind_trigger","trigger_content":…,"delivery_message":…}``。
@@ -1530,7 +1736,7 @@ WebSocket 聊天接口
       可再跟 ``chunk_audio``（``remind_audio``）+ WAV（朗读 ``delivery_message``）。
 
     可选遗留：``/ws/tts`` 仍可容纳连接，但默认前端已不再使用；朗读数据走 ``/ws/chat``。
-    客户端切换 Resources 下模型目录时，应对 ``/ws/chat`` 重连并带上 ``?package=<目录名>``，使首条 catalog 与动作 LLM 扫描该包。
+    客户端切换 Resources 下模型目录时，应对 ``/ws/chat`` 重连并带上 ``?package=<目录名>``，使首条 catalog 与专用标签模型选型一致。
 
 流式 Ollama（线程 A 与线程 B）：
     线程 A（事件循环线程）
@@ -1680,13 +1886,6 @@ async def chat_websocket(websocket: WebSocket):
                         scene_location=scene_location,
                         scene_time=scene_time,
                     )
-                expr, mot = await asyncio.to_thread(
-                    _infer_expression_motion,
-                    user_message,
-                    session_catalog,
-                    user_id=chat_user_id,
-                    package_key=session_catalog.package_key,
-                )
                 _ttp = normalized_tts_provider()
                 if _ttp == "mimo":
                     merged_stream = mimo_tts_configured()
@@ -1702,13 +1901,76 @@ async def chat_websocket(websocket: WebSocket):
                     and _ttp == "mimo"
                     and _mimo_ws_tts_single_shot_enabled()
                 )
-                first_visible_actions_sent = False
                 ai_reply_chunks: list[str] = []
+                l2d_parallel_state: dict[str, bool] = {"sent": False}
                 # ----- 阶段 1：初始化（均在事件循环所在线程 A，异步上下文） -----
                 # 当前运行中的事件循环，供线程 B 通过 run_coroutine_threadsafe 把 put 投递回 A。
                 loop = asyncio.get_running_loop()
+                parallel_live2d_task = asyncio.create_task(
+                    _emit_live2d_tags_parallel_llm(
+                        websocket=websocket,
+                        chat_session=chat_session,
+                        chat_user_id=chat_user_id,
+                        package_key=session_catalog.package_key,
+                        catalog=session_catalog,
+                        user_message=user_message,
+                        scene_location=scene_location,
+                        scene_time=scene_time,
+                        invalid_check=_chat_stream_invalid,
+                        sent_flag=l2d_parallel_state,
+                    )
+                )
                 # 线程 B 生产 chunk、线程 A 消费 chunk 的异步队列（put/get 必须在 loop 上 await）。
                 chunk_queue: asyncio.Queue = asyncio.Queue()
+                l2d_splitter = Live2dTagLineStripper()
+                live2d_tag_frames_sent = 0
+
+                async def _emit_pending_live2d_tags() -> None:
+                    nonlocal live2d_tag_frames_sent
+                    for kind, raw in l2d_splitter.pop_pending_raw_tags():
+                        line = _format_resolved_live2d_tag_line(
+                            kind, raw, session_catalog
+                        )
+                        if not line:
+                            continue
+                        if await _chat_stream_invalid():
+                            return
+                        if websocket.client_state != WebSocketState.CONNECTED:
+                            return
+                        ok = await _try_send_json(
+                            websocket,
+                            {"type": "live2d_tags", "text": line},
+                        )
+                        if ok:
+                            live2d_tag_frames_sent += 1
+
+                async def _send_live2d_fallback_tags_if_needed() -> None:
+                    nonlocal live2d_tag_frames_sent
+                    if live2d_tag_frames_sent > 0 or l2d_parallel_state["sent"]:
+                        return
+                    ex, mo = _expression_motion_from_tag_picks(
+                        l2d_splitter.prefix_emotion_raw or "",
+                        l2d_splitter.prefix_motion_raw or "",
+                        session_catalog,
+                    )
+                    lines: list[str] = []
+                    if ex:
+                        lines.append(f"{LIVE2D_EMOTION_TAG}{ex}")
+                    if mo:
+                        lines.append(f"{LIVE2D_MOTION_TAG}{mo}")
+                    if not lines:
+                        return
+                    if await _chat_stream_invalid():
+                        return
+                    if websocket.client_state != WebSocketState.CONNECTED:
+                        return
+                    body = "\n".join(lines)
+                    ok = await _try_send_json(
+                        websocket,
+                        {"type": "live2d_tags", "text": body},
+                    )
+                    if ok:
+                        live2d_tag_frames_sent += 1
                 # 线程 B 内若抛错，写入此列表；列表引用在闭包间共享，由阶段 4 在线程 A 读取并抛出。
                 pump_error: list[BaseException] = []
                 stop_requested = threading.Event()
@@ -1763,6 +2025,8 @@ async def chat_websocket(websocket: WebSocket):
                 tts_speed = _tts_speed_default()
                 tts_lang = os.getenv("TTS_TEXT_LANGUAGE", "zh")
                 tts_workers_n = _effective_tts_pipeline_workers()
+                _tts_seg_mode = _tts_stream_segment_mode()
+                _tts_char_flush_n = _tts_stream_flush_char_threshold()
 
                 text_buffer: list[str] = []
                 tts_sentence_end_punc_count = 0
@@ -1778,7 +2042,7 @@ async def chat_websocket(websocket: WebSocket):
 
                 async def _tts_flush_ordered() -> None:
                     """按 index 递增：合并模式下经本连接发 chunk_audio+WAV 或仅 chunk；否则丢弃 TTS 结果（文本已流式发出）。"""
-                    nonlocal tts_next_send, first_visible_actions_sent
+                    nonlocal tts_next_send
                     async with tts_send_lock:
                         while True:
                             if await _chat_stream_invalid():
@@ -1820,10 +2084,6 @@ async def chat_websocket(websocket: WebSocket):
                                         "type": "chunk",
                                         "content": text,
                                     }
-                                    if not first_visible_actions_sent:
-                                        payload["expression"] = expr
-                                        payload["motion"] = mot
-                                        first_visible_actions_sent = True
                                     ok = await _try_send_json(websocket, payload)
                                     if not ok:
                                         return
@@ -1852,10 +2112,6 @@ async def chat_websocket(websocket: WebSocket):
                                     "index": cur_idx,
                                     "size": len(wav),
                                 }
-                                if not first_visible_actions_sent:
-                                    audio_meta["expression"] = expr
-                                    audio_meta["motion"] = mot
-                                    first_visible_actions_sent = True
                                 ok = await _try_send_json(websocket, audio_meta)
                                 if not ok:
                                     return
@@ -1931,7 +2187,7 @@ async def chat_websocket(websocket: WebSocket):
                                         user_director_prompt=mimo_director_user_prompt
                                         or None,
                                         speech_assistant_only=not _mimo_ws_include_director,
-                                        merge_env_user_prompts=not _mimo_ws_include_director,
+                                        merge_env_user_prompts=True,
                                     )
                                 except ValueError as _mimo_ve:
                                     logger.warning(
@@ -2018,47 +2274,47 @@ async def chat_websocket(websocket: WebSocket):
 
                 try:
                     # ----- 阶段 3：消费队列并推送 WebSocket（线程 A，异步） -----
-                    first_chunk = True
-                    while True:
-                        # 队列为空时挂起本协程，事件循环可处理其它连接；有数据时被唤醒。
-                        content = await chunk_queue.get()
-                        if content is None:
-                            break
-                        if await _chat_stream_invalid():
-                            stop_requested.set()
-                            logger.warning("⚠️ 当前 chat 会话已失效，停止旧轮推送")
-                            break
-                        ai_reply_chunks.append(content)
+                    async def _emit_visible_segment(visible: str) -> bool:
+                        """下发一段已剥离 Live2D 标签行的可见文本。返回 False 表示应停止本轮消费。"""
+                        nonlocal tts_sentence_end_punc_count, tts_sentence_index
+                        if not visible:
+                            return True
+                        ai_reply_chunks.append(visible)
                         if websocket.client_state != WebSocketState.CONNECTED:
                             logger.warning("⚠️ 客户端已断开，停止推送消息")
                             stop_requested.set()
-                            break
+                            return False
                         if not merged_stream:
-                            if first_chunk:
-                                ok = await _try_send_json(
-                                    websocket,
-                                    _chunk_json(
-                                        content, expression=expr, motion=mot
-                                    ),
-                                )
-                                if not ok:
-                                    logger.info("ℹ️ 客户端已断开（首段 chunk 未发送）")
-                                    break
-                                first_chunk = False
-                            else:
-                                ok = await _try_send_json(
-                                    websocket, _chunk_json(content)
-                                )
-                                if not ok:
-                                    logger.info("ℹ️ 客户端已断开（chunk 未发送）")
-                                    break
+                            ok = await _try_send_json(
+                                websocket, _chunk_json(visible)
+                            )
+                            if not ok:
+                                logger.info("ℹ️ 客户端已断开（chunk 未发送）")
+                                return False
 
                         if _mimo_ws_single_shot:
-                            continue
+                            return True
+
+                        if _tts_seg_mode == "chars":
+                            for tk in iter_tokens(visible):
+                                text_buffer.append(tk)
+                                sentence_raw = "".join(text_buffer)
+                                if len(sentence_raw.strip()) < _tts_char_flush_n:
+                                    continue
+                                sentence = sentence_raw.strip()
+                                if not sentence:
+                                    continue
+                                text_buffer.clear()
+                                tts_sentence_end_punc_count = 0
+                                tts_sentence_index += 1
+                                await sentence_queue.put(
+                                    (tts_sentence_index, sentence)
+                                )
+                            return True
 
                         min_chars = _tts_min_chars_before_flush()
                         every_n_end = _tts_flush_every_n_sentence_end()
-                        for tk in iter_tokens(content):
+                        for tk in iter_tokens(visible):
                             text_buffer.append(tk)
                             if tk in _SENTENCE_PUNC:
                                 tts_sentence_end_punc_count += 1
@@ -2082,13 +2338,32 @@ async def chat_websocket(websocket: WebSocket):
                                 if not sentence:
                                     continue
 
-                            # 本段已送 TTS：清空缓冲与句末标点计数，后续 token 重新攒
                             text_buffer.clear()
                             tts_sentence_end_punc_count = 0
                             tts_sentence_index += 1
                             await sentence_queue.put(
                                 (tts_sentence_index, sentence)
                             )
+                        return True
+
+                    while True:
+                        content = await chunk_queue.get()
+                        if content is None:
+                            break
+                        if await _chat_stream_invalid():
+                            stop_requested.set()
+                            logger.warning("⚠️ 当前 chat 会话已失效，停止旧轮推送")
+                            break
+                        visible = l2d_splitter.feed(content)
+                        await _emit_pending_live2d_tags()
+                        if not await _emit_visible_segment(visible):
+                            break
+
+                    if not await _chat_stream_invalid():
+                        tail_vis = l2d_splitter.end()
+                        await _emit_pending_live2d_tags()
+                        if not await _emit_visible_segment(tail_vis):
+                            pass
 
                     if not await _chat_stream_invalid() and text_buffer:
                         sentence = "".join(text_buffer).strip()
@@ -2127,8 +2402,18 @@ async def chat_websocket(websocket: WebSocket):
                     stop_requested.set()
                     await producer
 
+                try:
+                    await parallel_live2d_task
+                except Exception:
+                    logger.exception(
+                        "Live2D 专用标签任务收尾异常 session=%s",
+                        chat_session,
+                    )
+
                 if pump_error:
                     raise pump_error[0]
+
+                await _send_live2d_fallback_tags_if_needed()
 
                 ai_reply_full = "".join(ai_reply_chunks).strip()
                 redis_write_task = asyncio.create_task(
@@ -2174,41 +2459,49 @@ async def chat_websocket(websocket: WebSocket):
                     _um = (user_message or "").strip()
                     _arf = (ai_reply_full or "").strip()
                     if _um and _arf:
-
-                        def _run_turn_remind_extract() -> None:
-                            try:
-                                from utils.remind_extract import extract_and_persist_reminders
-
-                                extract_and_persist_reminders(
-                                    chat_user_id,
-                                    _um,
-                                    _arf,
-                                    package_key=session_catalog.package_key,
-                                    session_id=turn_session_id,
-                                    scene_time=scene_time,
-                                )
-                            except Exception:
-                                logger.exception(
-                                    "异步抽取定时关怀失败 user_id=%s session=%s",
-                                    chat_user_id,
-                                    chat_session,
-                                )
-
-                        _turn_extract_task = asyncio.create_task(
-                            asyncio.to_thread(_run_turn_remind_extract),
-                            name=f"remind_extract_u{chat_user_id}",
+                        from utils.remind_extract import (
+                            extract_and_persist_reminders,
+                            remind_extract_turn_should_run,
                         )
 
-                        def _on_turn_extract_done(task: asyncio.Task) -> None:
-                            try:
-                                task.result()
-                            except Exception:
-                                logger.exception(
-                                    "异步抽取定时关怀任务收尾异常 user_id=%s",
-                                    chat_user_id,
-                                )
+                        if remind_extract_turn_should_run(
+                            chat_user_id,
+                            session_catalog.package_key,
+                            chat_session,
+                        ):
 
-                        _turn_extract_task.add_done_callback(_on_turn_extract_done)
+                            def _run_turn_remind_extract() -> None:
+                                try:
+                                    extract_and_persist_reminders(
+                                        chat_user_id,
+                                        _um,
+                                        _arf,
+                                        package_key=session_catalog.package_key,
+                                        session_id=turn_session_id,
+                                        scene_time=scene_time,
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "异步抽取定时关怀失败 user_id=%s session=%s",
+                                        chat_user_id,
+                                        chat_session,
+                                    )
+
+                            _turn_extract_task = asyncio.create_task(
+                                asyncio.to_thread(_run_turn_remind_extract),
+                                name=f"remind_extract_u{chat_user_id}",
+                            )
+
+                            def _on_turn_extract_done(task: asyncio.Task) -> None:
+                                try:
+                                    task.result()
+                                except Exception:
+                                    logger.exception(
+                                        "异步抽取定时关怀任务收尾异常 user_id=%s",
+                                        chat_user_id,
+                                    )
+
+                            _turn_extract_task.add_done_callback(_on_turn_extract_done)
 
                 if not await _chat_stream_invalid():
                     ok = await _try_send_json(websocket, {"type": "done"})

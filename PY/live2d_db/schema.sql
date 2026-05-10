@@ -5,6 +5,7 @@ SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
 
 DROP TABLE IF EXISTS `remind_trigger`;
+DROP TABLE IF EXISTS `background_image`;
 DROP TABLE IF EXISTS `chat_session`;
 DROP TABLE IF EXISTS `long_memory`;
 DROP TABLE IF EXISTS `user_profile`;
@@ -153,7 +154,8 @@ CREATE TABLE `remind_trigger` (
   `trigger_time` DATETIME NOT NULL COMMENT '触发时间',
   `session_id` BIGINT DEFAULT NULL COMMENT '关联 chat_session：产生该提醒的单轮对话，投递话术据此召回语境',
   `trigger_content` TEXT NOT NULL COMMENT '情景详细描述（与 REST/WebSocket JSON 中 trigger_content 同义；面向用户台词为 WS 帧 delivery_message）',
-  `is_triggered` TINYINT NOT NULL DEFAULT 0 COMMENT '是否触发(0-未触发 1-已触发)',
+  `is_triggered` TINYINT NOT NULL DEFAULT 0 COMMENT '0=待投递 2=投递中 1=已成功下发或可确认的跳过',
+  `delivery_started_at` DATETIME NULL DEFAULT NULL COMMENT '投递进行中起始时刻（is_triggered=2），超时由调度回收',
   `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   PRIMARY KEY (`trigger_id`),
   KEY `idx_trigger_user` (`user_id`),
@@ -161,3 +163,13 @@ CREATE TABLE `remind_trigger` (
   CONSTRAINT `fk_remind_user` FOREIGN KEY (`user_id`) REFERENCES `user` (`user_id`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `fk_remind_session` FOREIGN KEY (`session_id`) REFERENCES `chat_session` (`session_id`) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='主动关怀触发表';
+
+-- 9. background_image（全局场景背景图索引；实体在 MinIO，MySQL 仅存逻辑名与对外 URL）
+CREATE TABLE `background_image` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `name` VARCHAR(512) NOT NULL COMMENT '显示名/逻辑名，不含 .jpg 等扩展名',
+  `url` VARCHAR(1024) NOT NULL COMMENT 'MinIO 对外访问 URL（与 MINIO_PUBLIC_BASE + 对象键一致）',
+  `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '写入时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='背景图（MinIO 存储，MySQL 仅存索引）';

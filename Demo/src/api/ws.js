@@ -19,7 +19,7 @@ let clearOutputTimerId = null;
 /** 本轮回复流是否已收到 `done`（二进制音频可能仍在播放） */
 let replyStreamDone = false;
 
-/** 收到 done 且已无排队/播放中的 TTS 时收口型；表情与动作保持至下一轮对话再由首 chunk 切换 */
+/** 收到 done 且已无排队/播放中的 TTS 时收口型；表情与动作由 ``live2d_tags`` 帧驱动并保持至下一轮 */
 function maybeFinalizeReplyPlayback() {
     if (!replyStreamDone) {
         return;
@@ -55,14 +55,16 @@ let ttsActiveBufferSources = 0;
 let ttsLipRafId = null;
 
 /**
- * 合成偏快时可略降速（1=原速）。可在页面脚本里设 globalThis.__TTS_PLAYBACK_RATE__ = 0.85
+ * 1 = 按 WAV 原速原调播放。MiMo 等云端合成一般为正常语速，默认用 1 避免 playbackRate 连带降调。
+ * 若后端为 GPT-SoVITS 且 ``TTS_SPEED`` 偏大仍觉得快，可在页面提前设
+ * ``globalThis.__TTS_PLAYBACK_RATE__ = 0.88``（会略降音高，属浏览器 playbackRate 特性）。
  */
 const TTS_PLAYBACK_RATE =
     typeof globalThis.__TTS_PLAYBACK_RATE__ === "number" &&
     globalThis.__TTS_PLAYBACK_RATE__ > 0.1 &&
     globalThis.__TTS_PLAYBACK_RATE__ <= 4
         ? globalThis.__TTS_PLAYBACK_RATE__
-        : 0.88;
+        : 1;
 
 function getTtsAudioContext() {
     if (!ttsAudioContext) {
@@ -128,6 +130,8 @@ function runTtsLipRaf(analyser) {
 }
 let isAwaitingAiReply = false;
 let pendingUserMessageAfterReconnect = null;
+/** 一旦出现可见正文即取消「正在等待中」占位；此前 AI 气泡仅占位 */
+let aiWaitingPhase = false;
 
 function getOutput() {
     return document.getElementById("output");
@@ -443,43 +447,93 @@ function ensureStreamingAiMessageItem() {
     return streamingAiItem;
 }
 
+/**
+ * 用户消息已入列后调用：在列表底部展示 AI 侧「正在等待中」占位（有待显示正文即取消）。
+ */
+export function beginAiReplyWaitingUi() {
+    aiWaitingPhase = true;
+    const list = getChatList();
+    if (!list) return;
+    streamingAiItem = null;
+    const item = ensureStreamingAiMessageItem();
+    item.classList.add("chat-item--waiting");
+    item.setAttribute("aria-busy", "true");
+    item.replaceChildren();
+    const label = document.createElement("span");
+    label.className = "chat-waiting-label";
+    label.textContent = "正在等待中";
+    const dots = document.createElement("span");
+    dots.className = "chat-waiting-dots";
+    dots.setAttribute("aria-hidden", "true");
+    dots.textContent = "···";
+    item.appendChild(label);
+    item.appendChild(dots);
+    list.scrollTop = list.scrollHeight;
+}
+
 function updateStreamingAiMessage(text) {
     const item = ensureStreamingAiMessageItem();
     const list = getChatList();
     if (!item || !list) return;
-    item.textContent = text;
+    const t = String(text ?? "");
+    if (aiWaitingPhase) {
+        if (!t.trim().length) {
+            list.scrollTop = list.scrollHeight;
+            return;
+        }
+        aiWaitingPhase = false;
+        item.classList.remove("chat-item--waiting");
+        item.removeAttribute("aria-busy");
+        item.replaceChildren();
+    }
+    item.textContent = t;
     list.scrollTop = list.scrollHeight;
 }
 
 function finalizeStreamingAiMessage() {
     if (!streamingAiItem) return;
+    aiWaitingPhase = false;
+    streamingAiItem.classList.remove("chat-item--waiting");
+    streamingAiItem.removeAttribute("aria-busy");
     if (!streamingAiItem.textContent.trim()) {
         streamingAiItem.remove();
     }
     streamingAiItem = null;
 }
 
+/** 解析服务端下发的 ``#emotion#`` / ``#motion#`` 标签行（可多行），不写入聊天气泡 */
+function applyLive2dTagText(text) {
+    const raw = String(text ?? "").trim();
+    if (!raw) {
+        return;
+    }
+    const em = "#emotion#";
+    const mo = "#motion#";
+    for (const line of raw.split(/\r?\n/)) {
+        const s = line.trim();
+        if (!s) {
+            continue;
+        }
+        const low = s.toLowerCase();
+        if (low.startsWith(em)) {
+            applyChatLive2dActions(s.slice(em.length).trim(), undefined);
+        } else if (low.startsWith(mo)) {
+            applyChatLive2dActions(undefined, s.slice(mo.length).trim());
+        }
+    }
+}
+
 /**
  * 将一条可见文本段落到 UI（与对应音频同序，由上游保证）
  * @param {string} content
- * @param {{ expression?: string, motion?: string }} [actions]
  */
-function applyVisibleTextSegment(content, actions) {
+function applyVisibleTextSegment(content) {
     const output = document.getElementById("output");
     if (output && content) {
         appendOutputWithHeightLimit(output, content);
     }
     currentAiReply += content;
     updateStreamingAiMessage(currentAiReply);
-    if (
-        actions &&
-        (actions.expression !== undefined || actions.motion !== undefined)
-    ) {
-        applyChatLive2dActions(
-            actions.expression !== undefined ? actions.expression : undefined,
-            actions.motion !== undefined ? actions.motion : undefined
-        );
-    }
     updateOutputVisibility();
 }
 
@@ -497,22 +551,18 @@ function handleTextChatIncoming(event) {
             "动作",
             data.motion?.length ?? 0
         );
+    } else if (data.type === "live2d_tags") {
+        applyLive2dTagText(data.text);
     } else if (data.type === "chunk") {
-        applyVisibleTextSegment(data.content, {
-            expression: data.expression,
-            motion: data.motion
-        });
+        applyVisibleTextSegment(data.content);
     } else if (data.type === "chunk_audio") {
         pendingAudioMeta = {
             index: data.index,
             size: data.size
         };
-        // 定时关怀朗读：正文已在 remind_trigger 里用橙色气泡展示，勿再走流式 AI 紫气泡
+        // 定时关怀朗读：正文已在 remind_trigger 里用角色侧紫色气泡展示，勿再走流式 AI 气泡
         if (!data.remind_audio) {
-            applyVisibleTextSegment(data.content, {
-                expression: data.expression,
-                motion: data.motion
-            });
+            applyVisibleTextSegment(data.content);
         }
     } else if (data.type === "remind_trigger") {
         const scene = String(data.trigger_type ?? "").trim();
@@ -531,6 +581,11 @@ function handleTextChatIncoming(event) {
     } else if (data.type === "done") {
         pendingAudioMeta = null;
         console.log("回复完成（文本与音频帧已结束）");
+        aiWaitingPhase = false;
+        if (streamingAiItem) {
+            streamingAiItem.classList.remove("chat-item--waiting");
+            streamingAiItem.removeAttribute("aria-busy");
+        }
         if (!streamingAiItem) {
             appendChatMessage("ai", currentAiReply.trim());
         } else {
@@ -550,6 +605,11 @@ function handleTextChatIncoming(event) {
             appendOutputWithHeightLimit(outEl, `\n[错误] ${msg}`);
         }
         currentAiReply += `\n[错误] ${msg}`;
+        aiWaitingPhase = false;
+        if (streamingAiItem) {
+            streamingAiItem.classList.remove("chat-item--waiting");
+            streamingAiItem.removeAttribute("aria-busy");
+        }
         updateStreamingAiMessage(currentAiReply);
         updateOutputVisibility();
         isAwaitingAiReply = false;
@@ -704,6 +764,7 @@ function buildChatWsPayload(text) {
 }
 
 function resetStreamingState() {
+    aiWaitingPhase = false;
     if (clearOutputTimerId) {
         clearTimeout(clearOutputTimerId);
         clearOutputTimerId = null;

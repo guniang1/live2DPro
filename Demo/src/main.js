@@ -17,6 +17,7 @@ import AudioRecorder from './utils/AudioRecorder.js';
 import SpeechRecognition from './utils/SpeechRecognition.js';
 import {
     appendChatMessage,
+    beginAiReplyWaitingUi,
     prependChatHistoryRows,
     reconnectChatWebSocketsForNewPackage,
     renderChatHistoryRows,
@@ -679,6 +680,7 @@ window.addEventListener(
 
             if (sendChatMessage(text)) {
                 appendChatMessage("user", text);
+                beginAiReplyWaitingUi();
                 chatInput.value = '';
                 recordStatus.textContent = '已发送';
             } else {
@@ -710,8 +712,25 @@ window.addEventListener(
 
             // 正在录音/识别 → 停止
             if (AudioRecorder.isRecording() || SpeechRecognition.isRecognizingNow()) {
+                const pending =
+                    chatInput && typeof chatInput.value === 'string'
+                        ? chatInput.value.trim()
+                        : '';
+                // 输入框已有文本（含实时识别写入）：先发消息再关麦
+                if (pending) {
+                    recordStatus.textContent = '处理中...';
+                    sendTextMessage();
+                    try {
+                        await AudioRecorder.stop();
+                        SpeechRecognition.stop();
+                    } catch (e) {
+                        console.error("停止/识别失败:", e);
+                    }
+                    return;
+                }
+
                 recordStatus.textContent = '处理中...';
-                
+
                 // 停止录音和识别（增加异常捕获）
                 try {
                     await AudioRecorder.stop();
@@ -719,10 +738,9 @@ window.addEventListener(
                 } catch (e) {
                     console.error("停止/识别失败:", e);
                 }
-                
+
                 recordStatus.textContent = '点击';
-               
-            } 
+            }
             // 未录音 → 开始
             else {
                 recordStatus.textContent = '请求麦克风权限...';
@@ -734,18 +752,26 @@ window.addEventListener(
                     
                     // ================================ 开始语音识别 ================================
                     const startSuccess = await SpeechRecognition.start((text, isFinal) => {
+                        // 同步到输入框，便于再次点击麦克风时「有字则发送」
+                        if (chatInput && text) {
+                            chatInput.value = text;
+                        }
                         // 更新识别状态显示
                         if (text) {
                             recordStatus.textContent = isFinal ? `识别完成: ${text}` : `录音中: ${text}`;
                         } else {
                             recordStatus.textContent = '录音中...（请说话）';
                         }
-                        
+
                         // 如果是最终结果，发送到WebSocket
                         if (isFinal && text) {
                             recordStatus.textContent = `正在发送: ${text}`;
                             if (sendChatMessage(text)) {
                                 appendChatMessage("user", text);
+                                beginAiReplyWaitingUi();
+                                if (chatInput) {
+                                    chatInput.value = '';
+                                }
                                 recordStatus.textContent = `已发送: ${text}`;
                             } else {
                                 alert(
