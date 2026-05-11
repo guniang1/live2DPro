@@ -1,19 +1,20 @@
 """定时关怀投递时生成对用户说的话术。
 
-库表 ``remind_trigger.trigger_content`` 存**情景详细描述**；投递时由 LLM **重新撰写**面向用户的台词。
+库表 ``remind_trigger.trigger_content`` 存**情景概要**（抽取阶段由瞬时/短期记忆等主料生成的五维备忘：用户时间、地点、角色、事件、氛围）；投递时由 LLM **重新撰写**面向用户的台词。
 写入 LLM **User** 消息的拼装顺序（与论文 6.5.1 一致）：
 
 1. 人设块（可选）：从 MySQL 表 ``persona`` 经 ``PersonaRepository.resolve_persona_for_package`` 读取当前包的 ``tone_style`` / ``character_desc``；
 2. 用户画像块（可选）：``USER_PROFILE_IN_CHAT`` 未关闭且画像存在非空字段时，``format_profile_for_chat_system`` → ``【用户画像】``；
 3. 当前对话瞬时记忆（可选）：与 ``/ws/chat`` 相同 ``(user_id, package_key)`` 分桶，Redis List 按时间顺序的多轮 user/assistant 原文，**不含**短期压缩层；
 4. **关怀类型**：``trigger_type``；
-5. **情景详细描述**：库内 ``trigger_content``（无则正文写 ``未提供``）；
+5. **情景概要**：库内 ``trigger_content``（无则正文写 ``未提供``）；
 6. **关联对话原文**：``session_id`` → ``chat_session.user_input`` / ``ai_reply``；无有效 ``session_id`` 或无法读取则正文写 ``未绑定``。
 
 系统提示要求当场口语、以情景与瞬时对话为主轴，可呼应关联单轮与人设/画像；输出 1～3 句中文；禁止 JSON/Markdown；约 800 字上限（代码侧超长截断加 ``…``）。
 模型 ``REMIND_DELIVERY_MODEL``（缺省同 ``OLLAMA_MODEL``）；可选 ``REMIND_DELIVERY_TEMPERATURE``、``REMIND_DELIVERY_NUM_PREDICT``。
 环境变量 ``REMIND_DELIVERY_USE_LLM`` 置 ``0``/``false``/``no``/``off`` 时不调用 Ollama；若情景、关联 ``session_id`` 对话块与 Redis 瞬时记忆三者皆空、Ollama 调用失败或剥离后正文为空，亦返回空串，由 ``wschat._deliver_remind_trigger_on_websocket`` 跳过下发。
-``delivery_message`` 为生成稿；``trigger_content`` 与 REST 一致为库内情景原文。
+``delivery_message`` 为生成稿；``trigger_content`` 与 REST 一致为库内情景概要原文。
+WebSocket 已成功下发非空 ``remind_trigger`` JSON 后，由 ``wschat._persist_remind_delivery_to_chat_session`` 写入 ``chat_session``（``user_input`` 为空，``ai_reply`` 为台词；并更新 Redis 瞬时列表，不经画像/短期摘要调度）；多连接时仅首次成功连接落库一行。
 """
 
 from __future__ import annotations

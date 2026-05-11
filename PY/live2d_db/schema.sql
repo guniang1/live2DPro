@@ -153,7 +153,7 @@ CREATE TABLE `remind_trigger` (
   `trigger_type` VARCHAR(30) NOT NULL COMMENT '触发类型(生日/考试/纪念日/日常关怀)',
   `trigger_time` DATETIME NOT NULL COMMENT '触发时间',
   `session_id` BIGINT DEFAULT NULL COMMENT '关联 chat_session：产生该提醒的单轮对话，投递话术据此召回语境',
-  `trigger_content` TEXT NOT NULL COMMENT '情景详细描述（与 REST/WebSocket JSON 中 trigger_content 同义；面向用户台词为 WS 帧 delivery_message）',
+  `trigger_content` TEXT NOT NULL COMMENT '情景概要：瞬时/短期记忆等主料生成的五维备忘（用户时间、地点、角色、事件、氛围）；与 REST/WS 字段 trigger_content 同义；面向用户台词为 delivery_message',
   `is_triggered` TINYINT NOT NULL DEFAULT 0 COMMENT '0=待投递 2=投递中 1=已成功下发或可确认的跳过',
   `delivery_started_at` DATETIME NULL DEFAULT NULL COMMENT '投递进行中起始时刻（is_triggered=2），超时由调度回收',
   `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',

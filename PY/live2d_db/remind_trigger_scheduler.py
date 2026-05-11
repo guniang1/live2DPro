@@ -3,6 +3,7 @@
 离线用户仅在下次建立 ``/ws/chat`` 时由 ``flush_pending_reminders_for_connection`` 补发。
 
 投递语义：**仅**在 WebSocket 已成功下发 ``remind_trigger`` JSON（含非空 ``delivery_message``）后，将 ``is_triggered`` 置为 **1**。
+同一时刻由 ``wschat`` 将台词落入 ``chat_session`` 并刷新 Redis 瞬时记忆（实现见 ``_persist_remind_delivery_to_chat_session``）。
 未下发 JSON（无连接、发送失败、正文为空等）须 ``2→0`` 释放占用以便重试，**不得**标为已触发。
 占用投递时用 **2**（投递中）防止并发重复下发；发送失败则 **2→0** 以便重试。
 超时仍卡在 **2** 的记录由每轮扫描起始的回收逻辑重置为 **0**（见 ``REMIND_DELIVERY_STALE_SECONDS``）。

@@ -148,13 +148,13 @@
     </p>
 
     <form id="login-form">
-      <div class="field">
+      <div class="field" hidden>
         <label class="label" for="api-base">后端 API 地址</label>
         <input class="input" id="api-base" name="apiBase" type="url" value="http://localhost:8000" required>
       </div>
 
       <div class="field">
-        <label class="label" for="username">用户名（唯一）</label>
+        <label class="label" for="username">用户名</label>
         <input class="input" id="username" name="username" type="text" maxlength="50" placeholder="请输入用户名" required>
       </div>
 
@@ -170,7 +170,6 @@
 
       <div class="actions">
         <button class="btn btn-primary" id="submit-btn" type="submit">创建身份并登录</button>
-        <button class="btn btn-secondary" id="go-main-btn" type="button">直接进入主页面</button>
       </div>
     </form>
 
@@ -182,7 +181,6 @@
     (function () {
       const form = document.getElementById("login-form");
       const submitBtn = document.getElementById("submit-btn");
-      const goMainBtn = document.getElementById("go-main-btn");
       const statusEl = document.getElementById("status");
       const apiBaseInput = document.getElementById("api-base");
       const defaultMainPath = "../index.html";
@@ -210,7 +208,6 @@
 
       function setLoading(loading) {
         submitBtn.disabled = loading;
-        goMainBtn.disabled = loading;
       }
 
       function persistLogin(payload) {
@@ -310,8 +307,6 @@
       } catch (e) {
         // 本地缓存损坏时忽略，继续展示登录表单
       }
-
-      goMainBtn.addEventListener("click", goMain);
 
       form.addEventListener("submit", async function (e) {
         e.preventDefault();

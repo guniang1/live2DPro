@@ -197,7 +197,7 @@ def format_profile_for_chat_system(p: Optional[UserProfile]) -> str:
     trouble = (p.trouble_events or "").strip()
     if not any((tags, emo, pref, trouble)):
         return ""
-    lines = ["【用户画像】（由近期对话周期性更新，供共情与个性化回复参考；勿向用户复述本块原文）"]
+    lines = ["【用户人设】"]
     if tags:
         lines.append(f"- 标签：{tags}")
     if emo:

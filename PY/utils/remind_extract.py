@@ -1,18 +1,24 @@
 """从单轮对话（用户输入 + 助手回复）抽取定时关怀条目，写入 ``remind_trigger``。
 
-在 ``/ws/chat`` 每轮落库后按需调用（默认 **每 2 轮对话抽取一次**，见 ``remind_extract_turn_should_run``）；
-可通过 ``REMIND_EXTRACT_EVERY_N_TURNS`` / ``REMIND_EXTRACT_FROM_DIALOGUE`` 等调整。
+在 ``/ws/chat`` **每轮**落库后异步调用（``remind_extract_turn_should_run`` 固定为每轮触发，不按 N 轮节流）。
+可通过 ``REMIND_EXTRACT_FROM_DIALOGUE`` 开关总功能。
+若同时配置 ``PERSONA_EXPAND_OPENAI_BASE_URL``、``PERSONA_EXPAND_OPENAI_API_KEY``、``PERSONA_EXPAND_OPENAI_MODEL``（与人设扩写云端同源），则关怀抽取 **优先** 走该 OpenAI 兼容 ``/chat/completions``，否则回退本地 Ollama（``REMIND_EXTRACT_MODEL`` / ``OLLAMA_MODEL``）。
+**抽取材料**仅为本轮用户消息与助手回复；注入 LLM 的上下文 **不含** Redis 瞬时记忆、短期记忆，也 **不含** MySQL 长期摘要——与日程相关的依据只能来自当前这一轮的两段正文。
+人设绑定与人设正文仅用于角色指称一致，**不得**据此编造本轮未出现的日程。
+``trigger_content`` 的事实必须全部出自【本轮对话】。
+**仅** ``trigger_type`` 为 **生日、纪念日、考试** 之一的条目才会入库；模型若显式标成「其他」等占位类别（见 ``_OTHER_TRIGGER_LABELS_*``）或与三类不符的输出一律 **不入库**。
 抽取 LLM 所见的「当前时刻」先取 **Unix 时间戳** 再换算为本机本地 **``年月日:时分秒``** 字符串（与相对时间换算表同一格式），再写入 User 消息文首，便于模型推算 ``trigger_time``。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
 import re
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -22,26 +28,45 @@ import pymysql.err
 from live2d_db.connection import connection_ctx
 from live2d_db.db_config import DbConfig
 from live2d_db.entities import Persona, RemindTrigger
-from live2d_db.memory_layers import (
-    format_long_memory_block,
-    read_instant_turns_chronological,
-)
 from live2d_db.package_key_util import normalize_package_key
-from live2d_db.redis_factory import get_redis_client
-from live2d_db.repositories import (
-    LongMemoryRepository,
-    PersonaRepository,
-    RemindTriggerRepository,
-)
+from live2d_db.repositories import PersonaRepository, RemindTriggerRepository
 
 logger = logging.getLogger(__name__)
 
-_ALLOWED_TYPES = frozenset({"生日", "纪念日", "考试", "日常关怀"})
+_ALLOWED_TYPES = frozenset({"生日", "纪念日", "考试"})
+_OTHER_TRIGGER_LABELS_CN = frozenset(
+    {
+        "其他",
+        "其它",
+        "其他类",
+        "其它类",
+        "其他类型",
+        "其它类型",
+        "无类",
+        "不属于",
+        "不适用",
+        "无法归类",
+        "待定",
+    }
+)
+_OTHER_TRIGGER_LABELS_EN = frozenset(
+    {
+        "other",
+        "others",
+        "misc",
+        "miscellaneous",
+        "unknown",
+        "none",
+        "na",
+        "n/a",
+        "othercategory",
+        "other_category",
+    }
+)
 _MAX_REMINDERS_PER_TURN = 8
 _CONTENT_MAX = 4000
 _SKEW = timedelta(minutes=2)
 _REMIND_CTX_PERSONA_MAX = 3500
-_REMIND_CTX_INSTANT_MAX = 4500
 
 
 def _now_local_from_timestamp() -> datetime:
@@ -54,71 +79,14 @@ def _format_datetime_for_extract_llm(dt: datetime) -> str:
     return dt.replace(microsecond=0).strftime("%Y年%m月%d日:%H:%M:%S")
 
 
-def _remind_extract_every_n_turns() -> int:
-    raw = (os.getenv("REMIND_EXTRACT_EVERY_N_TURNS") or "2").strip()
-    try:
-        return max(1, min(100, int(raw)))
-    except ValueError:
-        return 2
-
-
-def _remind_extract_turn_counter_ttl_sec() -> int:
-    raw = (os.getenv("REMIND_EXTRACT_TURN_CTR_TTL_SEC") or "604800").strip()
-    try:
-        return max(3600, min(86400 * 90, int(raw)))
-    except ValueError:
-        return 604800
-
-
 def remind_extract_turn_should_run(
     user_id: int,
     package_key: str | None,
     ws_session_key: str,
 ) -> bool:
-    """本轮结束后是否应触发关怀抽取。
-
-    默认 **每 N 轮**（``REMIND_EXTRACT_EVERY_N_TURNS``，缺省 **2**）执行一次：第 1 轮跳过，第 2、4、6… 轮执行。
-    计数按 ``user_id`` + 规范化 ``package_key`` + WebSocket ``session`` 分桶，存在 Redis；不可用时不节流（仍每轮抽取），以免丢提醒。
-    """
-    if user_id < 1:
-        return False
-    n = _remind_extract_every_n_turns()
-    if n <= 1:
-        return True
-    pkg = normalize_package_key((package_key or "").strip() or None, fallback="default")
-    sid = (ws_session_key or "").strip() or "default"
-    sid_fp = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:20]
-    cli = get_redis_client(logger)
-    if cli is None:
-        logger.debug(
-            "关怀抽取节流：Redis 不可用，按兼容策略本轮仍执行 user_id=%s pkg=%s",
-            user_id,
-            pkg,
-        )
-        return True
-    key = f"remind_extract:turn_ctr:{user_id}:{pkg}:{sid_fp}"
-    try:
-        c_raw = cli.incr(key)
-        c = int(c_raw)
-        if c == 1:
-            cli.expire(key, _remind_extract_turn_counter_ttl_sec())
-        ok = (c % n) == 0
-        if not ok:
-            logger.debug(
-                "关怀抽取节流跳过：计数=%s/%s user_id=%s pkg=%s",
-                c,
-                n,
-                user_id,
-                pkg,
-            )
-        return ok
-    except Exception:
-        logger.exception(
-            "关怀抽取节流计数失败，本轮仍执行抽取 user_id=%s pkg=%s",
-            user_id,
-            pkg,
-        )
-        return True
+    """本轮结束后是否应触发关怀抽取：固定为每轮执行（保留参数供调用方兼容）。"""
+    _ = (package_key, ws_session_key)
+    return user_id >= 1
 
 
 def _enabled() -> bool:
@@ -130,8 +98,129 @@ def _enabled() -> bool:
     )
 
 
+def _env_ollama_model_or_none(raw: str | None) -> str | None:
+    """解析环境变量中的模型名；空串、纯空白、或以 # 开头（误把注释写进 .env）视为未配置。"""
+    if raw is None:
+        return None
+    s = raw.strip()
+    if not s or s.startswith("#"):
+        return None
+    return s
+
+
+def _persona_expand_openai_triplet() -> tuple[str, str, str] | None:
+    """人设扩写云端同款三项均已配置时返回 ``(api_key, base_url, model)``，否则 ``None``。"""
+    api_key = (os.getenv("PERSONA_EXPAND_OPENAI_API_KEY") or "").strip()
+    base = (os.getenv("PERSONA_EXPAND_OPENAI_BASE_URL") or "").strip().rstrip("/")
+    model = (os.getenv("PERSONA_EXPAND_OPENAI_MODEL") or "").strip()
+    if api_key and base and model:
+        return api_key, base, model
+    return None
+
+
+def _remind_extract_http_timeout_sec() -> float:
+    for key in ("REMIND_EXTRACT_HTTP_TIMEOUT", "PERSONA_EXPAND_HTTP_TIMEOUT"):
+        raw = (os.getenv(key) or "").strip()
+        if raw:
+            try:
+                return max(15.0, min(600.0, float(raw)))
+            except ValueError:
+                pass
+    return 120.0
+
+
+def _remind_extract_openai_max_tokens() -> int:
+    raw = (os.getenv("REMIND_EXTRACT_MAX_TOKENS") or "2048").strip()
+    try:
+        return max(256, min(8192, int(raw or "2048")))
+    except ValueError:
+        return 2048
+
+
+def _openai_chat_completion_extract(
+    api_key: str,
+    base: str,
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    temperature: float,
+    max_tokens: int,
+    timeout: float,
+) -> str:
+    """POST ``{base}/chat/completions``；优先带 ``response_format=json_object``，400 时回退不带。"""
+    url = f"{base}/chat/completions"
+    base_payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    tries: list[dict[str, Any]] = [
+        {**base_payload, "response_format": {"type": "json_object"}},
+        base_payload,
+    ]
+
+    last_http: urllib.error.HTTPError | None = None
+    for payload in tries:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+                "Authorization": f"Bearer {api_key}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw_txt = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")
+            last_http = e
+            if e.code == 400 and "response_format" in payload:
+                logger.debug(
+                    "关怀抽取云端忽略 response_format 并重试 HTTP %s: %s",
+                    e.code,
+                    err_body[:400],
+                )
+                continue
+            logger.warning("关怀抽取云端 HTTP %s: %s", e.code, err_body[:800])
+            raise
+        except OSError as e:
+            logger.warning("关怀抽取云端请求失败 url=%s: %s", url, e)
+            raise
+
+        try:
+            data = json.loads(raw_txt)
+        except json.JSONDecodeError:
+            logger.warning("关怀抽取云端返回非 JSON")
+            return ""
+
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            logger.warning("关怀抽取云端返回无 choices")
+            return ""
+        msg = choices[0].get("message") if isinstance(choices[0], dict) else None
+        content = ""
+        if isinstance(msg, dict):
+            content = str(msg.get("content") or "").strip()
+        return content
+
+    if last_http:
+        raise last_http
+    return ""
+
+
 def _model_name() -> str:
-    return (os.getenv("REMIND_EXTRACT_MODEL") or os.getenv("OLLAMA_MODEL", "qwen2.5:3b")).strip()
+    trip = _persona_expand_openai_triplet()
+    if trip:
+        return trip[2]
+    for key in ("REMIND_EXTRACT_MODEL", "OLLAMA_MODEL"):
+        m = _env_ollama_model_or_none(os.getenv(key))
+        if m:
+            return m
+    return "qwen2.5:3b"
 
 
 def _ollama_client() -> ollama.Client:
@@ -413,29 +502,6 @@ def _truncate_ctx(text: str, max_chars: int) -> str:
     return s[: max(1, max_chars - 1)].rstrip() + "…"
 
 
-def _long_memory_overview_for_package(
-    user_id: int, package_key: str | None
-) -> tuple[str, str]:
-    """当前包的规范化键与 ``long_memory.period_overview`` 摘要（仅作抽取 LLM 上下文，不入库为外键）。"""
-    pkg_norm = normalize_package_key((package_key or "").strip() or None, fallback="default")
-    if user_id < 1:
-        return pkg_norm, ""
-    try:
-        with connection_ctx(DbConfig.from_env()) as conn:
-            lm = LongMemoryRepository.get_by_user_pkg(conn, user_id, pkg_norm)
-        if lm is None:
-            return pkg_norm, ""
-        overview = format_long_memory_block(lm.period_overview or "")
-        return pkg_norm, overview
-    except Exception:
-        logger.exception(
-            "查询 long_memory 概要失败 user_id=%s package_key=%s",
-            user_id,
-            pkg_norm,
-        )
-        return pkg_norm, ""
-
-
 def _mysql_persona_row_for_package(user_id: int, package_key: str) -> Persona | None:
     """从 MySQL ``persona`` 表解析当前用户 + 模型包的人设行（与 ``/ws/chat``、关怀投递同源）。"""
     if user_id < 1:
@@ -450,7 +516,7 @@ def _mysql_persona_row_for_package(user_id: int, package_key: str) -> Persona | 
         code = e.args[0] if e.args else None
         if code in (1146, 1054):
             logger.warning(
-                "关怀抽取读取人设跳过（persona 表或列不可用 errno=%s），仍可仅用记忆与对话生成文案",
+                "关怀抽取读取人设跳过（persona 表或列不可用 errno=%s），仍可仅用本轮对话生成文案",
                 code,
             )
             return None
@@ -477,34 +543,8 @@ def _format_persona_block_from_row(row: Persona | None) -> str:
     return _truncate_ctx("\n\n".join(parts), _REMIND_CTX_PERSONA_MAX)
 
 
-def _persona_block_for_package(user_id: int, package_key: str) -> str:
-    """包级人设正文（MySQL）；供仅需文本块的调用方。"""
-    return _format_persona_block_from_row(_mysql_persona_row_for_package(user_id, package_key))
-
-
-def _instant_memory_context_block(user_id: int, package_key: str) -> str:
-    """Redis 瞬时记忆（本会话近期多轮）；写入时机可能略晚于本轮，故 LLM 侧仍配有「本轮对话」块。"""
-    if user_id < 1:
-        return ""
-    cli = get_redis_client(logger)
-    if cli is None:
-        return ""
-    turns = read_instant_turns_chronological(cli, user_id, package_key)
-    if not turns:
-        return ""
-    lines: list[str] = []
-    for t in turns:
-        u = (t.get("u") or "").strip()
-        a = (t.get("a") or "").strip()
-        if u:
-            lines.append(f"用户：{u}")
-        if a:
-            lines.append(f"当前模型角色：{a}")
-    return _truncate_ctx("\n".join(lines), _REMIND_CTX_INSTANT_MAX)
-
-
 def _build_remind_extract_context(
-    user_id: int, pkg_norm: str, period_overview: str
+    user_id: int, pkg_norm: str
 ) -> str:
     blocks: list[str] = []
     persona_row = _mysql_persona_row_for_package(user_id, pkg_norm)
@@ -528,18 +568,6 @@ def _build_remind_extract_context(
     persona = _format_persona_block_from_row(persona_row)
     if persona:
         blocks.append(f"【当前模型人设】{persona}")
-    ov = (period_overview or "").strip()
-    if ov:
-        blocks.append(
-            "【长期记忆摘要】"
-            + ov
-        )
-    instant = _instant_memory_context_block(user_id, pkg_norm)
-    if instant:
-        blocks.append(
-            "【瞬时记忆】"
-            + instant
-        )
     return "\n\n".join(blocks).strip()
 
 
@@ -602,11 +630,31 @@ def _roll_trigger_time_to_future(dt: datetime, now: datetime) -> datetime:
     return dt
 
 
-def _normalize_trigger_type(raw: object) -> str | None:
-    """将模型输出的 ``trigger_type`` 规范为四类之一。
+def _raw_trigger_type_is_explicit_other(raw: object) -> bool:
+    """模型把类别写成「其他」等占位 → **不入库**（与空白、胡填区分，便于日志）。"""
+    if raw is None:
+        return False
+    s = str(raw).strip()
+    if not s:
+        return False
+    compact = re.sub(r"[\s\u3000]+", "", s)
+    if compact in _OTHER_TRIGGER_LABELS_CN:
+        return True
 
-    **仅**接受与白名单一致的中文四字（可去空白后匹配），或少数完整英文等价词。
-    不属于四类、胡填、无法归类 → 返回 ``None``，上层**跳过入库**（等价于 trigger_type 为空、不启用本条关怀）。
+    fw = "ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ"
+    hw = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    low = s.translate(str.maketrans(fw, hw)).casefold().strip()
+    eng = re.sub(r"[\s\u3000_-]+", "", low)
+    if eng in _OTHER_TRIGGER_LABELS_EN or low in _OTHER_TRIGGER_LABELS_EN:
+        return True
+    return False
+
+
+def _normalize_trigger_type(raw: object) -> str | None:
+    """将模型输出的 ``trigger_type`` 规范为三类之一（生日 / 纪念日 / 考试）。
+
+    **仅**接受与白名单一致的中文（可去空白后匹配），或少数完整英文等价词。
+    不属于三类、胡填、无法归类 → 返回 ``None``，上层**跳过入库**。
     """
     if raw is None:
         return None
@@ -630,12 +678,6 @@ def _normalize_trigger_type(raw: object) -> str | None:
         return "纪念日"
     if exam_kw.intersection(parts) or eng in exam_kw:
         return "考试"
-    if (
-        eng in ("dailycare", "routinecare", "dailyroutine")
-        or ("daily" in parts and "care" in parts)
-        or ("routine" in parts and "care" in parts)
-    ):
-        return "日常关怀"
     return None
 
 
@@ -691,29 +733,39 @@ def _call_extract_llm(
     )
     system = (
         "你是信息抽取器。根据给定的一轮对话（用户与「当前模型角色回复」各一段），判断是否包含可以落实到具体日期或时间的"
-        "将来事项，用于数字人稍后主动关怀。\n\n"
+        "将来事项，用于数字人稍后主动关怀。\n"
+        "**禁止**依据瞬时记忆、短期记忆、长期摘要或其它多轮历史推断日程；``trigger_type`` / ``trigger_time`` / ``trigger_content`` 所依据的事实 **只能**出现在下文【本轮对话】两段中。"
+        "【当前模型人设】块仅用于称呼与人设一致，**禁止**用其捏造本轮未口述的日期或事件。\n\n"
         "规则：\n"
-        "1. **trigger_type**（键名固定为 trigger_type，不要用 type/kind 代替）：仅当判断属于下面 **四类之一** 时才输出该条，"
-        "且值必须是 **生日、纪念日、考试、日常关怀** 四字原文之一（勿加空格或前后缀）。\n"
-        "   若判断该事项 **不属于** 以上四类（例如「加班 deadline」「去医院复查」但说不清归哪类），则 **整条不要写入 reminders**，"
-        "**禁止**输出 trigger_type 为空字符串或「其他」「待定」等占位项——服务端会将无法识别的类型一律视为 **不抽取**。\n"
+        "1. **trigger_type**（键名固定为 trigger_type，不要用 type/kind 代替）：仅当判断属于下面 **三类之一** 时才输出该条，"
+        "且值必须是 **生日、纪念日、考试** 原文之一（生日、纪念日为两字，考试为两字；勿加空格或前后缀）。\n"
+        "   若事项可归为「将来要做的琐事提醒」但 **不属于** 生日、纪念日、考试（例如普通约会、去医院复查、加班截止），则 **不要写入 reminders**——"
+        "服务端 **仅接受这三类**，其它一律不入库。\n"
+        "   若你只能判断为 **「其他」**（不归生日、纪念日、考试），必须输出 **空列表** ``{\"reminders\":[]}``，"
+        "**禁止**输出一条 ``trigger_type`` 为「其他」「待定」等的对象——服务端会 **丢弃** 该类条目、**不入库**。\n"
+        "   **禁止**输出 trigger_type 为空字符串或「日常关怀」等——无法识别的类型一律 **不抽取**。\n"
         "2. 生日：明确提及生日日期（可按年重复）。\n"
         "3. 纪念日：恋爱、结婚、相识等重要纪念日。\n"
         "4. 考试：明确考试、面试、答辩等日期。\n"
-        "5. 日常关怀：用户明确约定未来某日要做某事、需要被提醒或问候，且不属于以上三类。\n"
-        "6. 若没有可信的具体日期/时间，或纯属泛泛闲聊、情绪倾诉而无日程，必须输出空列表。\n"
-        "7. trigger_time 字符串格式见上文「用户消息」开头说明（可到月/日/时，不必强行写分秒）。\n"
+        "5. 若没有可信的具体日期/时间，或纯属泛泛闲聊、情绪倾诉而无日程，必须输出空列表。\n"
+        "6. trigger_time 字符串格式见上文「用户消息」开头说明（可到月/日/时，不必强行写分秒）。\n"
         "   若文首列出【相对时间换算结果】且本条与之对应，**直接采用表中绝对时间**；否则须以【对话语境参考时间】为基准换算相对时间。\n"
         "   对照【服务器当前时间】核对是否合理，禁止凭空年份。\n"
         "   绝对日期：用户说「今年 6 月 15 日」须用参考时间所在自然年；未提年份时用「即将到来」的那一次日期。\n"
-        "8. trigger_content 填写「情景详细描述」：客观记录当时约定的时间点、事件、用户情绪与关键事实（若干句），"
-        "用于系统在**触发当日**再结合该轮对话记录当场生成最终关怀话术；**不要**写成已经对用户念出口的台词式问候。"
-        "描述须与人设、长期记忆摘要及瞬时记忆一致，勿编造矛盾事实。\n"
+        "7. trigger_content 填写「情景概要」（入库备忘，非对用户终稿）：**事实来源仅限【本轮对话】**（用户一段与「当前模型角色回复」一段）；"
+        "**不得**写入仅存在于人设块或多轮记忆中的细节。"
+        "用若干句客观叙述整合为一条连贯概要，须显式覆盖下列维度（缺一不可；未知项须写明占位语，禁止空白）："
+        "**用户时间**（对话语境下的时刻、日期或时段）；**用户地点**（本轮未提及则写「地点未提及」）；"
+        "**角色**（数字人称呼遵守下文角色指称）；**事件**（约定或触发事由）；**氛围**（用户情绪、语气或场景气氛，材料不足可写「氛围未凸显」）。"
+        "用于系统在**触发当日**再结合关联对话当场生成最终关怀话术；**不要**写成已经对用户念出口的台词式问候。"
+        "描述须与人设及本轮对话一致，勿编造矛盾事实。\n"
         "   **角色指称**：提到本轮对话里的数字人时，须与上文【当前模型人设】（角色设定、语气）或用户本轮明确使用的**专名**一致；"
         "**禁止**单独写「助手」「AI」「虚拟助手」等泛指而不交代具体是谁（无人设专名时可用「当前对话中的 Live2D 角色」一次交代）。\n"
         "   若用户口头里的「助手」与角色专名实为同一人（与人设、本轮「当前模型角色回复」一致），须在描述中**合并为一种称呼**，"
         "**禁止**写成「西奥和助手」「喜欢某某和助手」这类易被理解成**两个不同主体**的并列。\n\n"
-        '只输出一个 JSON 对象，格式严格为：{"reminders":[{"trigger_type":"...","trigger_time":"...","trigger_content":"..."}]} ；其中 trigger_content 为情景详细描述；'
+        '只输出一个 JSON 对象，格式严格为：{"reminders":[{"trigger_type":"...","trigger_time":"...","trigger_content":"..."}]} '
+        "；其中 trigger_content 为情景概要（须含用户时间、用户地点、角色、事件、氛围五维，未知项用占位语）。"
+        "**仅** trigger_type 为 **生日、纪念日、考试** 的条目会由服务端入库。"
     )
     prefix = (context_prefix or "").strip()
     dialogue = (
@@ -721,34 +773,66 @@ def _call_extract_llm(
         f"【当前模型角色回复】（与本包【当前模型人设】为同一人，非第三者）\n{ai_reply}"
     )
     user_block = ref_line + (f"{prefix}\n\n{dialogue}" if prefix else dialogue)
-    opts: dict[str, Any] = {"num_predict": 2048, "temperature": 0.05, "format": "json"}
-    cli = _ollama_client()
+    messages_primary: list[dict[str, str]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_block},
+    ]
+    fix_followup = (
+        "你的上一段输出无法被标准 JSON 解析。"
+        "请只输出一个 JSON 对象，不要 markdown、不要中文解释。"
+        '格式：{"reminders":[]}；多条时每项须含 trigger_type（仅允许 生日、纪念日、考试）、trigger_time、trigger_content；'
+        "**仅能归为「其他」时不要输出条目，给空 reminders。**字符串内双引号必须转义为 \\\" 。"
+    )
     model = _model_name()
-    try:
-        r = cli.chat(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_block},
-            ],
-            options=opts,
+    trip = _persona_expand_openai_triplet()
+    opts: dict[str, Any] = {"num_predict": 2048, "temperature": 0.05, "format": "json"}
+    cli: ollama.Client | None = None
+    raw = ""
+
+    if trip:
+        api_key, base, om = trip
+        timeout = _remind_extract_http_timeout_sec()
+        max_tok = _remind_extract_openai_max_tokens()
+        logger.debug(
+            "关怀抽取使用 PERSONA_EXPAND_OPENAI_* 云端接口 base=%s model=%s",
+            base,
+            om,
         )
-    except Exception as e:
-        logger.warning("关怀抽取 LLM 调用失败 model=%s: %s", model, e)
         try:
-            del opts["format"]
+            raw = _openai_chat_completion_extract(
+                api_key,
+                base,
+                om,
+                messages_primary,
+                temperature=0.05,
+                max_tokens=max_tok,
+                timeout=timeout,
+            )
+        except Exception as e:
+            logger.warning("关怀抽取云端调用失败 model=%s: %s", model, e)
+            return None
+    else:
+        cli = _ollama_client()
+        try:
             r = cli.chat(
                 model=model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user_block},
-                ],
+                messages=messages_primary,
                 options=opts,
             )
-        except Exception as e2:
-            logger.warning("关怀抽取 LLM 重试失败: %s", e2)
-            return None
-    raw = _ollama_message_content(r)
+        except Exception as e:
+            logger.warning("关怀抽取 LLM 调用失败 model=%s: %s", model, e)
+            try:
+                del opts["format"]
+                r = cli.chat(
+                    model=model,
+                    messages=messages_primary,
+                    options=opts,
+                )
+            except Exception as e2:
+                logger.warning("关怀抽取 LLM 重试失败: %s", e2)
+                return None
+        raw = _ollama_message_content(r)
+
     logger.debug(
         "关怀抽取模型原始输出: %r",
         (raw[:800] + ("…" if len(raw) > 800 else "")) if raw else raw,
@@ -767,37 +851,63 @@ def _call_extract_llm(
         model,
         tail[:400],
     )
-    fix_opts = {k: v for k, v in opts.items() if k != "format"}
-    try:
-        r2 = cli.chat(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_block},
-                {"role": "assistant", "content": tail[:8000]},
-                {
-                    "role": "user",
-                    "content": (
-                        "你的上一段输出无法被标准 JSON 解析。"
-                        "请只输出一个 JSON 对象，不要 markdown、不要中文解释。"
-                        '格式：{"reminders":[]}；多条时每项须含四类之一的 trigger_type、trigger_time、trigger_content；'
-                        "**无法归类则省略该条，不要编造类型。**字符串内双引号必须转义为 \\\" 。"
-                    ),
-                },
-            ],
-            options=fix_opts,
-        )
-    except Exception as e:
-        logger.warning("关怀抽取纠错轮调用失败: %s", e)
+
+    if trip:
+        api_key, base, om = trip
+        timeout = _remind_extract_http_timeout_sec()
+        max_tok = _remind_extract_openai_max_tokens()
+        fix_messages: list[dict[str, str]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_block},
+            {"role": "assistant", "content": tail[:8000]},
+            {"role": "user", "content": fix_followup},
+        ]
+        try:
+            raw2 = _openai_chat_completion_extract(
+                api_key,
+                base,
+                om,
+                fix_messages,
+                temperature=0.05,
+                max_tokens=max_tok,
+                timeout=timeout,
+            )
+        except Exception as e:
+            logger.warning("关怀抽取云端纠错轮调用失败: %s", e)
+            raw2 = ""
+        else:
+            logger.debug(
+                "关怀抽取纠错轮模型输出: %r",
+                (raw2[:800] + ("…" if len(raw2) > 800 else "")) if raw2 else raw2,
+            )
+            parsed = _parse_llm_reminder_json(raw2)
+            if parsed is not None:
+                return parsed
     else:
-        raw2 = _ollama_message_content(r2)
-        logger.debug(
-            "关怀抽取纠错轮模型输出: %r",
-            (raw2[:800] + ("…" if len(raw2) > 800 else "")) if raw2 else raw2,
-        )
-        parsed = _parse_llm_reminder_json(raw2)
-        if parsed is not None:
-            return parsed
+        assert cli is not None
+        fix_opts = {k: v for k, v in opts.items() if k != "format"}
+        try:
+            r2 = cli.chat(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_block},
+                    {"role": "assistant", "content": tail[:8000]},
+                    {"role": "user", "content": fix_followup},
+                ],
+                options=fix_opts,
+            )
+        except Exception as e:
+            logger.warning("关怀抽取纠错轮调用失败: %s", e)
+        else:
+            raw2 = _ollama_message_content(r2)
+            logger.debug(
+                "关怀抽取纠错轮模型输出: %r",
+                (raw2[:800] + ("…" if len(raw2) > 800 else "")) if raw2 else raw2,
+            )
+            parsed = _parse_llm_reminder_json(raw2)
+            if parsed is not None:
+                return parsed
 
     logger.info(
         "关怀抽取解析失败 model=%s raw_len=%s raw_prefix=%s",
@@ -832,8 +942,8 @@ def extract_and_persist_reminders(
 ) -> int:
     """同步：调用抽取模型并插入 ``remind_trigger``；返回新增条数。
 
-    ``package_key`` 用于拉取 long_memory 概要等抽取上下文；**入库绑定**仅为 ``session_id``（本轮
-    ``chat_session``）。
+    ``package_key`` 用于规范化包键并拉取人设；抽取 LLM **不**读取长期/瞬时/短期记忆，日程依据仅为 ``user_input`` 与 ``ai_reply``。
+    **入库绑定**仅为 ``session_id``（本轮 ``chat_session``）。
     """
     if user_id < 1:
         return 0
@@ -848,8 +958,8 @@ def extract_and_persist_reminders(
     if len(ui) < 2 or len(ar) < 2:
         return 0
 
-    pkg_norm, period_overview = _long_memory_overview_for_package(user_id, package_key)
-    context_prefix = _build_remind_extract_context(user_id, pkg_norm, period_overview)
+    pkg_norm = normalize_package_key((package_key or "").strip() or None, fallback="default")
+    context_prefix = _build_remind_extract_context(user_id, pkg_norm)
 
     server_now = _now_local_from_timestamp()
     parsed_scene = _parse_scene_time_string(scene_time)
@@ -891,26 +1001,28 @@ def extract_and_persist_reminders(
             user_id,
             pkg_norm,
         )
-    if not (period_overview or "").strip():
-        logger.info(
-            "关怀抽取：该用户+包尚无 long_memory 概要（抽取上下文较弱）user_id=%s pkg=%s",
-            user_id,
-            pkg_norm,
-        )
-
     inserted = 0
     skipped_parse = 0
     skipped_past = 0
     skipped_bad_type = 0
+    skipped_explicit_other = 0
     for it in items[:_MAX_REMINDERS_PER_TURN]:
         if not isinstance(it, dict):
             continue
         raw_type = _raw_trigger_type_from_item(it)
+        if _raw_trigger_type_is_explicit_other(raw_type):
+            skipped_explicit_other += 1
+            logger.debug(
+                "关怀抽取跳过：LLM 归类为「其他」不入库 raw=%r item_keys=%s",
+                raw_type,
+                sorted(it.keys()),
+            )
+            continue
         tt = _normalize_trigger_type(raw_type)
         if not tt:
             skipped_bad_type += 1
             logger.info(
-                "关怀抽取跳过：trigger_type 不属于四类或未识别（视为 LLM 判定跳过本条）raw=%r item_keys=%s",
+                "关怀抽取跳过：trigger_type 非生日/纪念日/考试或未识别 raw=%r item_keys=%s",
                 raw_type,
                 sorted(it.keys()),
             )
@@ -965,11 +1077,12 @@ def extract_and_persist_reminders(
             )
     logger.info(
         "关怀抽取本轮 user_id=%s model=%s 模型给出条目=%s 写入库=%s "
-        "(跳过:无效类型=%s 时间解析=%s 已过期=%s)",
+        "(跳过:其他=%s 非三类=%s 时间解析=%s 已过期=%s)",
         user_id,
         _model_name(),
         len(items),
         inserted,
+        skipped_explicit_other,
         skipped_bad_type,
         skipped_parse,
         skipped_past,

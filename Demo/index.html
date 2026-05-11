@@ -197,6 +197,47 @@
       box-shadow: 0 1px 4px rgba(40, 38, 36, 0.04);
     }
 
+    /* 历史记录：时间在气泡外侧下方 */
+    .chat-message-cluster {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-width: 88%;
+      min-width: 0;
+    }
+
+    .chat-message-cluster .chat-item {
+      max-width: 100%;
+    }
+
+    .chat-message-cluster--user {
+      align-self: flex-end;
+      align-items: flex-end;
+    }
+
+    .chat-message-cluster--ai,
+    .chat-message-cluster--remind {
+      align-self: flex-start;
+      align-items: flex-start;
+    }
+
+    .chat-message-meta-time {
+      font-size: 11px;
+      line-height: 1.25;
+      white-space: nowrap;
+      padding: 0 2px;
+    }
+
+    .chat-message-cluster--user .chat-message-meta-time {
+      color: rgba(82, 76, 72, 0.52);
+    }
+
+    .chat-message-cluster--ai .chat-message-meta-time,
+    .chat-message-cluster--remind .chat-message-meta-time {
+      color: rgba(61, 53, 88, 0.48);
+      padding-left: 4px;
+    }
+
     .chat-item.user {
       align-self: flex-end;
       color: #524c48;

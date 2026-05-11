@@ -157,16 +157,61 @@ function getChatList() {
 }
 
 /**
+ * @param {string|undefined|null} isoOrRaw 服务端 ISO 串或其它可被 Date 解析的值
+ * @returns {string} 空串表示无法展示
+ */
+function formatChatHistoryTime(isoOrRaw) {
+    if (isoOrRaw == null || isoOrRaw === "") return "";
+    const d = new Date(isoOrRaw);
+    if (Number.isNaN(d.getTime())) return "";
+    const now = new Date();
+    const hm = { hour: "2-digit", minute: "2-digit", hour12: false };
+    const timePart = d.toLocaleTimeString("zh-CN", hm);
+    if (d.toDateString() === now.toDateString()) {
+        return timePart;
+    }
+    const yest = new Date(now);
+    yest.setDate(yest.getDate() - 1);
+    if (d.toDateString() === yest.toDateString()) {
+        return `昨天 ${timePart}`;
+    }
+    const withYear = d.getFullYear() !== now.getFullYear();
+    const datePart = withYear
+        ? `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`
+        : `${d.getMonth() + 1}月${d.getDate()}日`;
+    return `${datePart} ${timePart}`;
+}
+
+/**
  * @param {"user"|"ai"|"remind"} role
  * @param {string} text
+ * @param {{ timeLabel?: string, timeIso?: string }} [options]
  */
-function createChatBubbleElement(role, text) {
-    const item = document.createElement("div");
+function createChatBubbleElement(role, text, options = {}) {
     const bubble =
         role === "user" ? "user" : role === "remind" ? "remind" : "ai";
+    const item = document.createElement("div");
     item.className = `chat-item ${bubble}`;
     item.textContent = text;
-    return item;
+
+    const timeLabel =
+        options.timeLabel != null && String(options.timeLabel).trim()
+            ? String(options.timeLabel).trim()
+            : "";
+    if (!timeLabel) {
+        return item;
+    }
+
+    const cluster = document.createElement("div");
+    cluster.className = `chat-message-cluster chat-message-cluster--${bubble}`;
+    cluster.appendChild(item);
+    const meta = document.createElement("time");
+    meta.className = "chat-message-meta-time";
+    const timeIso = options.timeIso != null ? String(options.timeIso).trim() : "";
+    if (timeIso) meta.dateTime = timeIso;
+    meta.textContent = timeLabel;
+    cluster.appendChild(meta);
+    return cluster;
 }
 
 export function appendChatMessage(role, text) {
@@ -183,9 +228,14 @@ export function clearChatList() {
     list.innerHTML = "";
 }
 
+/** 定时关怀落库曾用「【主动关怀】」+ trigger_type 作占位 user_input；界面不展示该条。 */
+function isRemindCareUserStub(text) {
+    return String(text || "").trim().startsWith("【主动关怀】");
+}
+
 /**
  * 按 chat_session 表一行渲染用户气泡 + AI 气泡（时间升序列表）。
- * @param {Array<{ user_input?: string, ai_reply?: string }>} rows
+ * @param {Array<{ user_input?: string, ai_reply?: string, create_time?: string }>} rows
  */
 export function renderChatHistoryRows(rows) {
     clearChatList();
@@ -195,8 +245,20 @@ export function renderChatHistoryRows(rows) {
     for (const row of rows) {
         const u = String(row.user_input || "").trim();
         const a = String(row.ai_reply || "").trim();
-        if (u) frag.appendChild(createChatBubbleElement("user", u));
-        if (a) frag.appendChild(createChatBubbleElement("ai", a));
+        const timeLabel = formatChatHistoryTime(row.create_time);
+        const timeOpts = timeLabel
+            ? {
+                  timeLabel,
+                  timeIso:
+                      row.create_time != null
+                          ? String(row.create_time).trim()
+                          : ""
+              }
+            : {};
+        if (u && !isRemindCareUserStub(u)) {
+            frag.appendChild(createChatBubbleElement("user", u, timeOpts));
+        }
+        if (a) frag.appendChild(createChatBubbleElement("ai", a, timeOpts));
     }
     list.appendChild(frag);
     const prevBehavior = list.style.scrollBehavior;
@@ -208,7 +270,7 @@ export function renderChatHistoryRows(rows) {
 /**
  * 将更早的一页会话插到列表顶部（调用方负责恢复 scrollTop，避免跳动）。
  * rows 须已是时间正序（与 renderChatHistoryRows 一致）。
- * @param {Array<{ user_input?: string, ai_reply?: string }>} rows
+ * @param {Array<{ user_input?: string, ai_reply?: string, create_time?: string }>} rows
  */
 export function prependChatHistoryRows(rows) {
     const list = getChatList();
@@ -217,8 +279,20 @@ export function prependChatHistoryRows(rows) {
     for (const row of rows) {
         const u = String(row.user_input || "").trim();
         const a = String(row.ai_reply || "").trim();
-        if (u) frag.appendChild(createChatBubbleElement("user", u));
-        if (a) frag.appendChild(createChatBubbleElement("ai", a));
+        const timeLabel = formatChatHistoryTime(row.create_time);
+        const timeOpts = timeLabel
+            ? {
+                  timeLabel,
+                  timeIso:
+                      row.create_time != null
+                          ? String(row.create_time).trim()
+                          : ""
+              }
+            : {};
+        if (u && !isRemindCareUserStub(u)) {
+            frag.appendChild(createChatBubbleElement("user", u, timeOpts));
+        }
+        if (a) frag.appendChild(createChatBubbleElement("ai", a, timeOpts));
     }
     list.insertBefore(frag, list.firstChild);
 }
@@ -576,7 +650,8 @@ function handleTextChatIncoming(event) {
             );
             return;
         }
-        appendChatMessage("remind", body);
+        // 仅展示角色侧话术；user_input 落库为空（见 wschat._persist_remind_delivery_to_chat_session）
+        appendChatMessage("ai", body);
         console.info("[remind_trigger]", data.trigger_id, scene);
     } else if (data.type === "done") {
         pendingAudioMeta = null;

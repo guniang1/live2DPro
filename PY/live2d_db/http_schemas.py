@@ -218,7 +218,7 @@ class RemindTriggerCreate(BaseModel):
     )
     trigger_content: str = Field(
         ...,
-        description="创建时的情景详细描述；投递时由 LLM 结合本字段、Redis 瞬时多轮对话（不含短期层）等当场重写最终话术",
+        description="情景概要（抽取时以 Redis 瞬时+短期记忆等为主料，含用户时间/地点/角色/事件/氛围）；投递时由 LLM 结合本字段与瞬时多轮对话等当场重写最终话术",
     )
     is_triggered: int = 0
 
@@ -230,7 +230,7 @@ class RemindTriggerUpdate(BaseModel):
     session_id: Optional[int] = None
     trigger_content: str = Field(
         ...,
-        description="情景详细描述（库内保存）；与 RemindTriggerCreate 一致",
+        description="情景概要（库内保存）；与 RemindTriggerCreate 一致",
     )
     is_triggered: int
 
@@ -245,7 +245,7 @@ class RemindTriggerPublic(BaseModel):
     session_id: Optional[int] = None
     trigger_content: str = Field(
         ...,
-        description="情景详细描述（与 MySQL 列一致）；REST 与 WebSocket remind_trigger 帧中本字段语义相同",
+        description="情景概要（与 MySQL 列一致）；REST 与 WebSocket remind_trigger 帧中本字段语义相同",
     )
     delivery_message: Optional[str] = Field(
         None,
