@@ -1,10 +1,10 @@
 import { getApiBase } from "./apiBase.js";
 
-export async function uploadLive2dModelZip(userId, packageKey, zipFile) {
+export async function uploadLive2dModelZip(userId, packageKey, zipFile, options = {}) {
     if (!userId || !zipFile) {
         throw new Error("缺少必要参数");
     }
-    
+
     const formData = new FormData();
     formData.append("user_id", userId.toString());
     if (packageKey && packageKey.trim()) {
@@ -23,6 +23,22 @@ export async function uploadLive2dModelZip(userId, packageKey, zipFile) {
         throw new Error(result.message || "上传失败");
     }
     
+    return result.data;
+}
+
+/** 获取 HitAreas 侧栏填写模板（上传前参考） */
+export async function getHitAreasTemplate(packageKey) {
+    const pk = String(packageKey || "").trim();
+    if (!pk) {
+        throw new Error("缺少 package_key");
+    }
+    const response = await fetch(
+        `${getApiBase()}/live2d-model-assets/hit-areas-template?package_key=${encodeURIComponent(pk)}`
+    );
+    const result = await response.json();
+    if (result.code !== 0) {
+        throw new Error(result.message || "获取 HitAreas 模板失败");
+    }
     return result.data;
 }
 

@@ -60,6 +60,7 @@ from .http_schemas import (
     Live2dModelAssetPublic,
     Live2dModelAssetUpdate,
     Live2dModelPackageInfo,
+    Live2dHitAreasTemplatePublic,
     Live2dModelZipUploadPublic,
     Live2dTtsReferPublic,
     Live2dTtsReferUploadPublic,
@@ -105,6 +106,8 @@ from .repositories import (
     UserRepository,
 )
 from .package_purge import purge_user_package_data
+from .hit_areas_templates import get_hit_areas_template_for_api
+from .package_normalize import normalize_zip_bytes, should_skip_upload_asset
 from .scan_package import infer_asset_type
 from . import memory_layers as _memory_layers
 from .redis_factory import get_redis_client as _redis_factory_get_client
@@ -1534,6 +1537,18 @@ def live2d_model_assets_delete(asset_id: int, db: Db) -> OkRows:
     return OkRows(affected_rows=n)
 
 
+@router.get(
+    "/live2d-model-assets/hit-areas-template",
+    response_model=Live2dHitAreasTemplatePublic,
+)
+def live2d_model_assets_hit_areas_template(
+    package_key: str = Query(..., min_length=1, description="模型包键，如 moka、Xiaogou"),
+) -> Live2dHitAreasTemplatePublic:
+    """返回 HitAreas 侧栏 JSON 模板与仓库已登记示例（供上传前填写）。"""
+    data = get_hit_areas_template_for_api(package_key.strip())
+    return Live2dHitAreasTemplatePublic(**data)
+
+
 @router.post("/live2d-model-assets/upload-zip", response_model=Live2dModelZipUploadPublic)
 async def live2d_model_assets_upload_zip(
     db: Db,
@@ -1560,6 +1575,28 @@ async def live2d_model_assets_upload_zip(
     main_model3_path: Optional[str] = None
     refs: Dict[str, Any] = {}
     src_zip_key: Optional[str] = None
+    did_normalize = False
+    norm_warnings: List[str] = []
+    norm_hit_source = ""
+    norm_emotion_count = 0
+    norm_motion_count = 0
+
+    payload, norm_report, pkg_norm = normalize_zip_bytes(
+        payload,
+        package_key_hint=(package_key or "").strip() or None,
+    )
+    if norm_report.errors:
+        raise HTTPException(
+            status_code=400,
+            detail="模型包规范化失败: " + "; ".join(norm_report.errors),
+        )
+    did_normalize = True
+    norm_warnings = list(norm_report.warnings)
+    norm_hit_source = norm_report.hit_areas_source or ""
+    norm_emotion_count = norm_report.emotion_count
+    norm_motion_count = norm_report.motion_count
+    if not (package_key or "").strip() and pkg_norm:
+        package_key = pkg_norm
 
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as zf:
@@ -1607,6 +1644,9 @@ async def live2d_model_assets_upload_zip(
                     rel_path = full_path[len(root_prefix) + 1 :]
                 rel_path = rel_path.strip("/")
                 if not rel_path:
+                    skipped_files += 1
+                    continue
+                if should_skip_upload_asset(rel_path):
                     skipped_files += 1
                     continue
 
@@ -1663,4 +1703,9 @@ async def live2d_model_assets_upload_zip(
         inserted_rows=inserted_rows,
         uploaded_files=uploaded_files,
         skipped_files=skipped_files,
+        normalized=did_normalize,
+        normalize_warnings=norm_warnings,
+        hit_areas_source=norm_hit_source or None,
+        emotion_count=norm_emotion_count,
+        motion_count=norm_motion_count,
     )

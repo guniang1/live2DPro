@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "package_key": "moka",
+  "entry_model3": "moka.model3.json",
+  "expression_layout": {
+    "expressions_subdir": "expressions",
+    "motions_subdir": "motions"
+  },
+  "lip_sync_param_ids": [
+    "ParamMouthOpenY"
+  ],
+  "hit_areas": [],
+  "remove_paths": [
+    "textures/moca.moc3",
+    "textures/moca.model3.json",
+    "textures/moca.physics3.json",
+    "textures/moca.cdi3.json",
+    "textures/moca.vtube.json",
+    "textures/items_pinned_to_model.json"
+  ],
+  "remove_globs": [
+    "textures/textures/**"
+  ],
+  "motions": {},
+  "junk_dirs": []
+}

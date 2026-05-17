@@ -363,6 +363,22 @@ class Live2dModelZipUploadPublic(BaseModel):
     inserted_rows: int
     uploaded_files: int
     skipped_files: int
+    normalized: bool = False
+    normalize_warnings: list[str] = Field(default_factory=list)
+    hit_areas_source: Optional[str] = None
+    emotion_count: int = 0
+    motion_count: int = 0
+
+
+class Live2dHitAreasTemplatePublic(BaseModel):
+    """HitAreas 填写模板与已登记包配置。"""
+
+    package_key: str
+    sidecar_filename: str
+    sidecar_example: dict
+    model3_hit_areas_example: list
+    registered_template: dict = Field(default_factory=dict)
+    hint: str
 
 
 class DownloadUrlPublic(BaseModel):

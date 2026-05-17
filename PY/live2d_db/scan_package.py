@@ -19,6 +19,7 @@ from typing import Optional
 from .connection import connection_ctx
 from .db_config import DbConfig
 from .entities import Live2dModelAsset
+from .package_normalize import parse_model3_index, pick_entry_model3
 from .repositories import Live2dModelAssetRepository
 
 
@@ -64,6 +65,15 @@ def scan_and_sync(
     if not root.is_dir():
         raise FileNotFoundError(f"目录不存在: {root}")
 
+    entry_path = pick_entry_model3(root, package_key)
+    entry_rel: str | None = None
+    expr_index: dict[str, dict[str, str]] = {}
+    motion_index: dict[str, str] = {}
+    listed_files: set[str] = set()
+    if entry_path is not None:
+        entry_rel = entry_path.relative_to(root).as_posix()
+        expr_index, motion_index, listed_files = parse_model3_index(entry_path)
+
     assets: list[Live2dModelAsset] = []
     order = 0
     for path in sorted(root.rglob("*")):
@@ -71,8 +81,18 @@ def scan_and_sync(
             continue
         rel = path.relative_to(root)
         rel_posix = rel.as_posix()
+        if rel_posix.startswith(".live2d") or rel_posix.endswith(".bak"):
+            continue
         pub = f"{public_prefix.rstrip('/')}/{package_key}/{rel_posix}"
         st = path.stat()
+        logical_name = None
+        motion_group = None
+        if rel_posix in expr_index:
+            logical_name = expr_index[rel_posix].get("name") or None
+        if rel_posix in motion_index:
+            motion_group = motion_index[rel_posix]
+        is_listed = 1 if rel_posix in listed_files else 0
+        is_entry = 1 if entry_rel and rel_posix == entry_rel else 0
         assets.append(
             Live2dModelAsset(
                 user_id=int(user_id) if user_id is not None else 0,
@@ -83,7 +103,11 @@ def scan_and_sync(
                 public_url=pub,
                 file_size=st.st_size,
                 sort_order=order,
-                remark=None,
+                logical_name=logical_name,
+                motion_group=motion_group,
+                is_listed_in_model3=is_listed,
+                is_entry_model=is_entry,
+                remark="scan_package",
             )
         )
         order += 1

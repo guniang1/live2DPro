@@ -251,10 +251,17 @@ def _scan_package_from_mysql(user_id: int, package_key: str) -> tuple[list[str],
             continue
         rel_low = rel.lower()
         typ = (r.asset_type or "").strip().lower()
+        listed = int(getattr(r, "is_listed_in_model3", 0) or 0)
         if typ == "exp3" or rel_low.endswith(".exp3.json"):
-            expressions.append(rel)
+            if rel_low.startswith("motions/"):
+                continue
+            if rel_low.startswith("wardrobe/") or rel_low == "motion" or rel_low.startswith("motion/"):
+                continue
+            if listed == 1 or rel_low.startswith("expressions/"):
+                expressions.append(rel)
         elif typ == "motion3" or rel_low.endswith(".motion3.json"):
-            motions.append(rel)
+            if listed == 1 or rel_low.startswith("motions/"):
+                motions.append(rel)
     return sorted(set(expressions)), sorted(set(motions))
 
 

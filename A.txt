@@ -1,58 +1,9 @@
-feat(live2d_db): 按设计文档落地实体、DAO、schema 与迁移
+feat(live2d): 上传 ZIP 强制第一层规范化，全部 exp3 归入 expressions
 
-- 新增/维护 schema.sql、entities、repositories、connection/db_config
-- 提供 FastAPI 路由（http_api/http_schemas），含列表/筛选与 count
-- 迁移：live2d_model_asset（用户资源目录）、user_id 外键
-- live2d_action：语义资源（motion/expression 与 model_asset 关联），
-  列名 motion_path / expression_path（兼容旧列名回退）
-
-feat(storage): MinIO（S3 兼容）本地模拟对象存储
-
-- PY/docker-compose.minio.yml：可选一键起 MinIO（需本机安装 Docker）
-- live2d_db/minio_storage.py：bucket、upload_file/upload_bytes、公开 URL
-- PY/.env：MINIO_* 与 MySQL 等配置（由 main.py load_dotenv）
-
-chore: scan_package 等脚本用于从磁盘扫描资源入库（若已接入）
-==================================================================
-
-feat(ws): 拆分文本与 TTS WebSocket 职责
-
-- /ws/chat：仅流式 JSON 文本（chunk + done），移除 enable_tts 及 TTS 分支
-- //ws/tts：继续承担流式文本 + audio_chunk + 二进制 WAV
-- Demo/src/api/ws.js：并行连接文本与 TTS 两个 URL，按 enable_tts 选择发送目标；
-  纯文本仅发 { message }，TTS 端发 message/speed/text_language/max_tokens_without_punc
-- docs/后端项目正文.md：同步路由说明与请求字段表（删除 enable_tts 描述）
-
-=================================================================
-feat(tts): 流式分段以标点为主，前后端默认 30 字兜底
-
-- wschat: 缓冲内累计 ≥2 个断句标点再因标点入队；去掉按时间 flush
-- wschat: max_tokens_without_punc 默认 30；移除 max_wait_ms 参数与传参
-- Demo/ws.js: sendChatMessage 默认 max_tokens_without_punc 30（原为 8 导致 8 字即切）
-- Demo/ws.js: 请求体不再发送已废弃的 max_wait_ms
-
-
-==========================================
-
-feat(ws+live2d): 流式 chunk 驱动表情与动作
-- Demo: /ws/chat 首条 chunk 含 expression/motion 时调用 applyChatLive2dActions
-- Demo: LAppModel.startMotionByBasename 按 motion3 文件名对齐后端 catalog
-- Demo: LAppLive2DManager.applyChatLive2dActions / lappdelegate 导出桥接
-fix(llm+catalog): 动作/表情须双选、回退策略与按包扫描
-- PY: action_llm_system_text 强制两侧必选合法标识，禁止单侧留空
-- PY: 单侧补全 _fallback_expression_if_empty / _fallback_motion_if_empty
-- PY: get_catalog_for_package 按包缓存；init_catalog 预热默认包
-- PY: /ws/chat 读取 ?package=，连接日志与 catalog、_infer_expression_motion 使用 session 包
-- PY: _safe_live2d_package_key 防路径穿越
-feat(demo-ws): 与当前模型包同步并重连
-- Demo: wsConfig 附加 package，默认 ModelDir[0]
-- Demo: setLive2dPackage + reconnectChatWebSocketsForNewPackage
-- Demo: main 切换模型后更新包名并重连；ws 处理 type=catalog 日志
-chore(xiaogou): 表情资源语义化命名
-- Demo: expressions/1..22.exp3.json 重命名为 TXT 对照中文名
-- Demo: Xiaogou.model3.json / Xiaogou.vtube.json 路径与 Name 同步
-- Demo: 校园偶像 萨摩耶狗狗.txt 增补文件名对照说明
-- PY: tools/rename_xiaogou_expressions.py 可复用迁移脚本
-fix(tts): 默认取消流式合成按 token 强制切段
-- PY: 默认仅在句末标点 flush；TTS_MAX_TOKENS_WITHOUT_PUNC 空/0 为无限制
-- PY: 移除原 punc 计数阈值与默认 max_tok=30 切段逻辑
+- 新增 package_normalize：解压→整理目录→重写 model3→重打包
+- upload-zip 固定调用 normalize_zip_bytes，移除 normalize 表单开关
+- 全部 .exp3.json → expressions/ 并写入 Expressions；motions/ 仅 .motion3.json
+- 删除 expression_classify 及 emotion_names/motion_exp_names 等废弃逻辑
+- catalog 忽略 motions/ 下 exp3；修复 textures 嵌套删除 FileNotFoundError
+- 前端 assetUpload 去掉 normalize 参数，展示规范化摘要字段
+- 文档/论文同步；中文摘要去掉引号强调与括号
