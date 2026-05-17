@@ -110,6 +110,16 @@ class LongMemoryConsolidateNowPublic(BaseModel):
     )
 
 
+class UserProfileConsolidateNowPublic(BaseModel):
+    """手动触发用户画像合并后的应答（不走后台 24h 最短间隔限制）。"""
+
+    ok: bool = True
+    updated: bool = Field(
+        ...,
+        description="是否成功写入或更新了 user_profile（24h 窗内无对话或 LLM 结果为空时为 false）",
+    )
+
+
 # ----- persona -----
 class PersonaCreate(BaseModel):
     character_desc: str
@@ -189,6 +199,7 @@ class PersonaExpandHintsResponse(BaseModel):
 
 # ----- user_profile -----
 class UserProfileUpsert(BaseModel):
+    display_name: Optional[str] = Field(None, max_length=64)
     user_tags: Optional[str] = Field(None, max_length=255)
     emotion_state: Optional[str] = Field(None, max_length=30)
     preferences: Optional[str] = None
@@ -200,6 +211,7 @@ class UserProfilePublic(BaseModel):
 
     profile_id: int
     user_id: int
+    display_name: Optional[str] = None
     user_tags: Optional[str] = None
     emotion_state: Optional[str] = None
     preferences: Optional[str] = None

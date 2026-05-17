@@ -237,7 +237,7 @@ def _run_push_summary(redis_cli: Any, user_id: int, package_key: str) -> None:
 def maybe_push_short_term_summary_after_turn(
     redis_cli: Any, user_id: int, package_key: str
 ) -> None:
-    """在已成功写入本轮瞬时记忆后调用（与画像刷新计数相互独立）。"""
+    """在已成功写入本轮瞬时记忆后调用。"""
     if user_id < 1:
         return
     if not enabled():

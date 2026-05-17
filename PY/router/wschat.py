@@ -45,8 +45,6 @@ from live2d_db.repositories import (
 from utils.user_profile_refresh import (
     chat_inject_enabled,
     format_profile_for_chat_system,
-    maybe_refresh_user_profile_after_turn,
-    refresh_user_profile_on_disconnect,
 )
 from utils.short_term_summary import maybe_push_short_term_summary_after_turn
 from utils.live2d_catalog import (
@@ -553,7 +551,7 @@ def _persist_remind_delivery_to_chat_session(
     t: RemindTrigger,
     delivery_text: str,
 ) -> None:
-    """关怀 JSON 已成功下发后：写入 ``chat_session``，并仅更新瞬时记忆层（不触发画像/短期摘要调度）。"""
+    """关怀 JSON 已成功下发后：写入 ``chat_session``，并仅更新瞬时记忆层（不触发短期摘要调度）。"""
     text = (delivery_text or "").strip()
     if not text or user_id < 1:
         return
@@ -838,6 +836,184 @@ def _scene_context_system_block(*, scene_location: str, scene_time: str) -> str:
     return "【叙事与现实】" + "；".join(parts)
 
 
+_DEFAULT_CHAT_ROLE_ANCHOR = (
+    "你是一个 Live2D 数字人角色，请始终以角色口吻回复，"
+    "不要以通用 AI 助手身份说教。"
+)
+_DEFAULT_CHAT_REPLY_LENGTH_HINT = (
+    "\n\n请用 1～3 句话、以角色口吻直接回答，"
+    "不要自问自答、不要重复用户原话、不要编造未发生的对话轮次。"
+)
+_DEFAULT_CHAT_IDENTITY_RULES = (
+    "【身份与称呼】\n"
+    "· 你扮演【角色人设】中的 Live2D 角色；其中的名字、外号是角色自己的，不是用户的。\n"
+    "· 真人用户是对话里的「用户」；用户叫什么以【用户画像】和用户在对白里亲口说过的内容为准。\n"
+    "· 用户问「我叫什么」「我的名字」而材料未写明其自称时，应承认尚未知晓并请其告知，"
+    "禁止把角色名当成用户名（例如用户说「你是西奥」只表示角色叫西奥，不代表用户也叫西奥）。"
+)
+
+
+def _chat_role_anchor() -> str:
+    raw = os.getenv("CHAT_ROLE_ANCHOR")
+    if raw is None:
+        return _DEFAULT_CHAT_ROLE_ANCHOR
+    return raw.strip()
+
+
+def _chat_reply_length_hint() -> str:
+    raw = os.getenv("CHAT_REPLY_LENGTH_HINT")
+    if raw is None:
+        return _DEFAULT_CHAT_REPLY_LENGTH_HINT
+    return raw
+
+
+def _chat_identity_rules() -> str:
+    raw = os.getenv("CHAT_IDENTITY_RULES")
+    if raw is None:
+        return _DEFAULT_CHAT_IDENTITY_RULES
+    return raw.strip()
+
+
+def _chat_prompt_trim_enabled() -> bool:
+    return os.getenv("CHAT_PROMPT_TRIM_ENABLED", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _chat_prompt_max_chars() -> int:
+    try:
+        n = int((os.getenv("CHAT_PROMPT_MAX_CHARS") or "7000").strip() or "7000")
+    except ValueError:
+        return 7000
+    return max(2000, min(24000, n))
+
+
+def _truncate_text_keep_tail(text: str, max_chars: int) -> str:
+    s = (text or "").strip()
+    if max_chars < 8 or len(s) <= max_chars:
+        return s
+    return "…" + s[-(max_chars - 1) :].lstrip()
+
+
+def _assemble_main_chat_system_content(
+    role_block: str,
+    scene_block: str,
+    user_block: str,
+    time_block: str,
+    mem_block: str = "",
+) -> str:
+    parts = [role_block, scene_block, user_block, time_block]
+    if (mem_block or "").strip():
+        parts.append(mem_block)
+    body = "\n\n".join(parts)
+    head: list[str] = []
+    anchor = _chat_role_anchor()
+    if anchor:
+        head.append(anchor)
+    identity = _chat_identity_rules()
+    if identity:
+        head.append(identity)
+    if head:
+        return "\n\n".join(head) + "\n\n" + body
+    return body
+
+
+def _estimate_chat_user_message_chars(user_message: str) -> int:
+    um = (user_message or "").strip()
+    return len(f"【当前用户问题】\n{um}{_chat_reply_length_hint()}")
+
+
+def _format_instant_turns_plain(instant_turns: list[dict[str, str]]) -> str:
+    lines_i: list[str] = []
+    for t in instant_turns:
+        u = (t.get("u") or "").strip()
+        a = (t.get("a") or "").strip()
+        if u:
+            lines_i.append(f"用户：{_truncate_mysql_text(u)}")
+        if a:
+            lines_i.append(f"助手：{_truncate_mysql_text(a)}")
+    return "\n".join(lines_i) if lines_i else "（无）"
+
+
+def _build_and_trim_main_chat_system(
+    *,
+    role_block: str,
+    scene_block: str,
+    user_block: str,
+    time_block: str,
+    long_block: str,
+    short_plain: str,
+    instant_turns: list[dict[str, str]],
+    user_message: str = "",
+) -> tuple[str, list[dict[str, str]], list[str]]:
+    """按预算裁剪记忆层（短期→长期→瞬时轮数），保留 system 宏观顺序与角色锚点。"""
+    short_s = (short_plain or "").strip()
+    long_s = (long_block or "").strip()
+    inst: list[dict[str, str]] = list(instant_turns)
+    trim_steps: list[str] = []
+
+    def _sys() -> str:
+        mem = _format_three_memories_block(long_s, short_s, inst)
+        return _assemble_main_chat_system_content(
+            role_block, scene_block, user_block, time_block, mem
+        )
+
+    if not _chat_prompt_trim_enabled():
+        return _sys(), inst, trim_steps
+
+    budget = _chat_prompt_max_chars()
+    user_len = _estimate_chat_user_message_chars(user_message)
+    max_sys = max(800, budget - user_len)
+    sys_content = _sys()
+    if len(sys_content) <= max_sys:
+        return sys_content, inst, trim_steps
+
+    if short_s and short_s != "（无）":
+        for cap in (2000, 1200, 600, 300):
+            short_s = _truncate_text_keep_tail(short_s, cap)
+            trim_steps.append(f"short<={cap}")
+            sys_content = _sys()
+            if len(sys_content) <= max_sys:
+                return sys_content, inst, trim_steps
+
+    if long_s and long_s != "（无）":
+        for cap in (1000, 600, 300):
+            long_s = _truncate_text_keep_tail(long_s, cap)
+            trim_steps.append(f"long<={cap}")
+            sys_content = _sys()
+            if len(sys_content) <= max_sys:
+                return sys_content, inst, trim_steps
+
+    while len(inst) > 1 and len(_sys()) > max_sys:
+        inst = inst[1:]
+        trim_steps.append(f"instant_turns={len(inst)}")
+        sys_content = _sys()
+
+    if len(_sys()) > max_sys and inst:
+        one = inst[-1]
+        inst = [
+            {
+                "u": _truncate_mysql_text((one.get("u") or "").strip(), 500),
+                "a": _truncate_mysql_text((one.get("a") or "").strip(), 500),
+            }
+        ]
+        trim_steps.append("instant_single_truncated")
+        sys_content = _sys()
+
+    if len(sys_content) > max_sys:
+        trim_steps.append(f"still_over_budget sys={len(sys_content)} max={max_sys}")
+        logger.warning(
+            "【/ws/chat 提示词预算】裁剪后仍超长 system=%s max=%s steps=%s",
+            len(sys_content),
+            max_sys,
+            trim_steps,
+        )
+    return sys_content, inst, trim_steps
+
+
 def _main_chat_role_scene_profile_time_blocks(
     user_id: int,
     package_key: str,
@@ -845,7 +1021,7 @@ def _main_chat_role_scene_profile_time_blocks(
     scene_location: str = "",
     scene_time: str = "",
 ) -> tuple[str, str, str, str]:
-    """主对话静态四段：【角色人设】【角色场景】【用户人设】【用户时间】。"""
+    """主对话静态四段：【角色人设】【角色场景】【用户画像】【用户时间】。"""
     loc = (scene_location or "").strip()
     tim = (scene_time or "").strip()
     scene_block = "【角色场景】\n" + (loc or "（无）")
@@ -854,13 +1030,13 @@ def _main_chat_role_scene_profile_time_blocks(
         return (
             "【角色人设】\n（无）",
             scene_block,
-            "【用户人设】\n（无）",
+            "【用户画像】\n（无）",
             time_block,
         )
     extra = _package_persona_chat_extra_sync(user_id, package_key)
     role_block = "【角色人设】\n" + (extra.strip() or "（无）")
     prof = _user_profile_prompt_extra_sync(user_id)
-    user_block = prof if prof else "【用户人设】\n（无）"
+    user_block = prof if prof else "【用户画像】\n（无）"
     return (role_block, scene_block, user_block, time_block)
 
 
@@ -882,29 +1058,24 @@ def _chat_system_prompt_for_session(
             scene_time=scene_time,
         )
     )
-    return "\n\n".join([role_block, scene_block, user_block, time_block])
+    return _assemble_main_chat_system_content(
+        role_block, scene_block, user_block, time_block, ""
+    )
 
 
 def _format_three_memories_block(
     long_block: str, short_plain: str, instant_turns: list[dict[str, str]]
 ) -> str:
-    """主对话：长期 / 短期 / 瞬时 三段合一。"""
+    """主对话：块内瞬时→短期→长期，并标明冲突优先级（宏观仍在 system 末紧贴 user）。"""
     long_s = (long_block or "").strip() or "（无）"
     short_s = (short_plain or "").strip() or "（无）"
-    lines_i: list[str] = []
-    for t in instant_turns:
-        u = (t.get("u") or "").strip()
-        a = (t.get("a") or "").strip()
-        if u:
-            lines_i.append(f"用户：{_truncate_mysql_text(u)}")
-        if a:
-            lines_i.append(f"助手：{_truncate_mysql_text(a)}")
-    instant_s = "\n".join(lines_i) if lines_i else "（无）"
+    instant_s = _format_instant_turns_plain(instant_turns)
     return (
         "【三种记忆】\n"
-        f"长期：{long_s}\n"
-        f"短期：{short_s}\n"
-        f"瞬时：\n{instant_s}"
+        "若以下信息冲突，以优先级从高到低为准：最近对话 > 近期摘要 > 长期脉络。\n\n"
+        f"【最高优先级：最近对话】\n{instant_s}\n\n"
+        f"【高优先级：近期摘要】\n{short_s}\n\n"
+        f"【低优先级：长期脉络】\n{long_s}"
     )
 
 
@@ -924,7 +1095,9 @@ def _guest_main_chat_system_prompt(
     )
     mem_block = _format_three_memories_block("", "", [])
     # 用户画像/时间在前，【三种记忆】殿后：使瞬时对话紧贴本轮 user，减轻模型复述画像正文的概率
-    return "\n\n".join([role_block, scene_block, user_block, time_block, mem_block])
+    return _assemble_main_chat_system_content(
+        role_block, scene_block, user_block, time_block, mem_block
+    )
 
 
 def _mimo_director_role_guide_text(persona_role: str, persona_tone: str) -> str:
@@ -1112,13 +1285,16 @@ def _log_wschat_memory_snapshot(
     short_plain: str,
     long_block: str,
     non_system_messages: int,
+    system_chars: int = 0,
+    trim_steps: list[str] | None = None,
 ) -> None:
     """打印本轮送入模型的「可见历史」来源（瞬时/短期/长期），便于对照 MySQL chat_session。"""
     max_turns_cfg = _memory_layers.instant_memory_max_turns()
+    trimmed = ",".join(trim_steps) if trim_steps else ""
     logger.info(
         "【/ws/chat 记忆装配】user_id=%s ws_package=%s pkg_norm=%s redis=%s | "
         "瞬时轮数=%s（配置 INSTANT_MEMORY_MAX_TURNS=%s）| 短期块≈%s 字 | 长期块≈%s 字 | "
-        "送入模型的非 system 消息条数=%s。"
+        "system≈%s 字 | trimmed=%s | 送入模型的非 system 消息条数=%s。"
         "说明：此处不按请求扫描 MySQL；历史来自 Redis（登录时用 chat_session 预热）。",
         user_id,
         package_key,
@@ -1128,6 +1304,8 @@ def _log_wschat_memory_snapshot(
         max_turns_cfg,
         len(short_plain or ""),
         len(long_block or ""),
+        system_chars,
+        trimmed or "无",
         non_system_messages,
     )
     for idx, t in enumerate(instant_turns):
@@ -1153,8 +1331,9 @@ def _build_memory_for_model(
     *,
     scene_location: str = "",
     scene_time: str = "",
+    user_message: str = "",
 ) -> tuple[list[dict], str]:
-    """主对话：单条 system 为【角色人设】【角色场景】【用户人设】【用户时间】【三种记忆】；另由调用方追加【当前用户问题】。"""
+    """主对话：单条 system 为【角色人设】【角色场景】【用户画像】【用户时间】【三种记忆】；另由调用方追加【当前用户问题】。"""
     short_plain = ""
     role_block, scene_block, user_block, time_block = (
         _main_chat_role_scene_profile_time_blocks(
@@ -1165,10 +1344,22 @@ def _build_memory_for_model(
         )
     )
     if user_id <= 0:
-        mem_block = _format_three_memories_block("", "", [])
-        sys_content = "\n\n".join(
-            [role_block, scene_block, user_block, time_block, mem_block]
+        sys_content, _, trim_steps = _build_and_trim_main_chat_system(
+            role_block=role_block,
+            scene_block=scene_block,
+            user_block=user_block,
+            time_block=time_block,
+            long_block="",
+            short_plain="",
+            instant_turns=[],
+            user_message=user_message,
         )
+        if trim_steps:
+            logger.info(
+                "【/ws/chat 记忆装配】访客 system≈%s 字 trimmed=%s",
+                len(sys_content),
+                ",".join(trim_steps),
+            )
         return ([{"role": "system", "content": sys_content}], short_plain)
 
     pkg_norm = _normalize_package_key_for_cache(package_key, fallback="default")
@@ -1191,9 +1382,15 @@ def _build_memory_for_model(
     instant_turns: list[dict[str, str]] = []
 
     if cli is None:
-        mem_block = _format_three_memories_block(long_block, "", instant_turns)
-        sys_content = "\n\n".join(
-            [role_block, scene_block, user_block, time_block, mem_block]
+        sys_content, instant_turns, trim_steps = _build_and_trim_main_chat_system(
+            role_block=role_block,
+            scene_block=scene_block,
+            user_block=user_block,
+            time_block=time_block,
+            long_block=long_block,
+            short_plain="",
+            instant_turns=instant_turns,
+            user_message=user_message,
         )
         logger.info(
             "【/ws/chat 记忆装配】user_id=%s ws_package=%s pkg_norm=%s Redis=不可用 → "
@@ -1202,7 +1399,20 @@ def _build_memory_for_model(
             package_key,
             pkg_norm,
         )
-        return ([{"role": "system", "content": sys_content}], short_plain)
+        out = [{"role": "system", "content": sys_content}]
+        _log_wschat_memory_snapshot(
+            user_id=user_id,
+            package_key=package_key,
+            pkg_norm=pkg_norm,
+            redis_on=False,
+            instant_turns=instant_turns,
+            short_plain=short_plain,
+            long_block=long_block,
+            non_system_messages=0,
+            system_chars=len(sys_content),
+            trim_steps=trim_steps,
+        )
+        return (out, short_plain)
 
     short_entries = _memory_layers.read_short_entries_newest_first(cli, user_id, package_key)
     short_plain = _memory_layers.format_short_term_block(short_entries)
@@ -1214,9 +1424,15 @@ def _build_memory_for_model(
         short_plain = _memory_layers.format_short_term_block(short_entries)
         instant_turns = _memory_layers.read_instant_turns_chronological(cli, user_id, package_key)
 
-    mem_block = _format_three_memories_block(long_block, short_plain, instant_turns)
-    sys_content = "\n\n".join(
-        [role_block, scene_block, user_block, time_block, mem_block]
+    sys_content, instant_turns, trim_steps = _build_and_trim_main_chat_system(
+        role_block=role_block,
+        scene_block=scene_block,
+        user_block=user_block,
+        time_block=time_block,
+        long_block=long_block,
+        short_plain=short_plain,
+        instant_turns=instant_turns,
+        user_message=user_message,
     )
     out: list[dict] = [{"role": "system", "content": sys_content}]
     _log_wschat_memory_snapshot(
@@ -1228,6 +1444,8 @@ def _build_memory_for_model(
         short_plain=short_plain,
         long_block=long_block,
         non_system_messages=max(0, len(out) - 1),
+        system_chars=len(sys_content),
+        trim_steps=trim_steps,
     )
     return (out, short_plain)
 
@@ -1338,14 +1556,6 @@ def _append_turn_to_redis_history(
         cli = _get_redis_client()
         if cli is not None:
             try:
-                maybe_refresh_user_profile_after_turn(cli, user_id, package_key)
-            except Exception:
-                logger.exception(
-                    "用户画像周期刷新调度异常 user_id=%s package=%s",
-                    user_id,
-                    package_key,
-                )
-            try:
                 maybe_push_short_term_summary_after_turn(cli, user_id, package_key)
             except Exception:
                 logger.exception(
@@ -1422,7 +1632,8 @@ def ollama_chat_messages(
     if not msgs or msgs[0].get("role") != "system":
         msgs = [{"role": "system", "content": sys_content}, *msgs]
     um = (user_message or "").strip()
-    msgs.append({"role": "user", "content": f"【当前用户问题】\n{um}"})
+    hint = _chat_reply_length_hint()
+    msgs.append({"role": "user", "content": f"【当前用户问题】\n{um}{hint}"})
     return msgs
 
 
@@ -1967,6 +2178,7 @@ async def chat_websocket(websocket: WebSocket):
                     session_catalog.package_key,
                     scene_location=scene_location,
                     scene_time=scene_time,
+                    user_message=user_message,
                 )
                 # MiMo 合并流默认附带导演：【人设】【语气】仅人设字段（Redis/MySQL），不含【场景】与通用说明。
                 # 显式 ``MIMO_TTS_WS_INCLUDE_DIRECTOR=0`` 可关闭。
@@ -2647,23 +2859,6 @@ async def chat_websocket(websocket: WebSocket):
                 _session_chat_ws.pop(chat_session, None)
             _unregister_chat_ws_for_user(chat_user_id, websocket)
         _cleanup_tts_refer_runtime(tts_refer_runtime)
-        if chat_user_id >= 1:
-            _cli_pf = _get_redis_client()
-            if _cli_pf is not None:
-                _pkg_pf = session_catalog.package_key
-                try:
-                    await asyncio.to_thread(
-                        refresh_user_profile_on_disconnect,
-                        _cli_pf,
-                        chat_user_id,
-                        _pkg_pf,
-                    )
-                except Exception:
-                    logger.exception(
-                        "关页断开触发的用户画像刷新异常 user_id=%s package=%s",
-                        chat_user_id,
-                        _pkg_pf,
-                    )
         try:
             if websocket.client_state == WebSocketState.CONNECTED:
                 await websocket.close()

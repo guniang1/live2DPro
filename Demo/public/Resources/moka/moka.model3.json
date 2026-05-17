@@ -1,0 +1,120 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "moka.moc3",
+		"Textures": [
+			"textures/texture_00.png"
+		],
+		"Physics": "moka.physics3.json",
+		"DisplayInfo": "moka.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "angry",
+				"File": "angry.exp3.json"
+			},
+			{
+				"Name": "black hear",
+				"File": "black hear.exp3.json"
+			},
+			{
+				"Name": "black pants",
+				"File": "black pants.exp3.json"
+			},
+			{
+				"Name": "black shirt",
+				"File": "black shirt.exp3.json"
+			},
+			{
+				"Name": "cardigan",
+				"File": "cardigan.exp3.json"
+			},
+			{
+				"Name": "check pants",
+				"File": "check pants.exp3.json"
+			},
+			{
+				"Name": "coat",
+				"File": "coat.exp3.json"
+			},
+			{
+				"Name": "glasses",
+				"File": "glasses.exp3.json"
+			},
+			{
+				"Name": "happy",
+				"File": "happy.exp3.json"
+			},
+			{
+				"Name": "heart",
+				"File": "heart.exp3.json"
+			},
+			{
+				"Name": "high neck",
+				"File": "high neck.exp3.json"
+			},
+			{
+				"Name": "hoodie",
+				"File": "hoodie.exp3.json"
+			},
+			{
+				"Name": "loop tai",
+				"File": "loop tai.exp3.json"
+			},
+			{
+				"Name": "poku",
+				"File": "poku.exp3.json"
+			},
+			{
+				"Name": "shy",
+				"File": "shy.exp3.json"
+			},
+			{
+				"Name": "star",
+				"File": "star.exp3.json"
+			},
+			{
+				"Name": "sweat",
+				"File": "sweat.exp3.json"
+			},
+			{
+				"Name": "take of jacket",
+				"File": "take of jacket.exp3.json"
+			},
+			{
+				"Name": "take of tai",
+				"File": "take of tai.exp3.json"
+			},
+			{
+				"Name": "vest",
+				"File": "vest.exp3.json"
+			},
+			{
+				"Name": "white shirt",
+				"File": "white shirt.exp3.json"
+			},
+			{
+				"Name": "in trouble",
+				"File": "in trouble.exp3.json"
+			}
+		]
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		}
+	],
+	"HitAreas": []
+}

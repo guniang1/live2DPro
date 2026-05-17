@@ -3,8 +3,8 @@
 一行 ``long_memory`` 对应一个模型角色 (user_id + package_key)；Redis 缓存合并后的 prompt 片段。
 摘要依据来自表 ``chat_session``。
 
-**产品约定**：LLM 摘要环节 **只维护** ``period_overview``（新摘要追加到原有内容之后）。
-注入聊天 system 时仅 ``LONG_MEMORY_DIMENSIONS``（周期概要）。
+**产品约定**：LLM **滚动合并** ``period_overview``（单段替换，禁止分隔符堆叠）；稳定用户信息见 ``user_profile``。
+注入聊天 system 时仅 ``LONG_MEMORY_DIMENSIONS``（周期概要，超长保留文尾）。
 """
 
 from __future__ import annotations
@@ -41,7 +41,13 @@ def merge_long_memory_record_for_prompt(record: Any) -> str:
         text = (str(raw).strip() if raw is not None else "")
         if text:
             parts.append(f"【{label}】\n{text}")
-    return "\n\n".join(parts).strip()
+    body = "\n\n".join(parts).strip()
+    if not body:
+        return ""
+    return (
+        "以下为近期对话脉络（称呼、长期偏好等稳定信息见用户画像，此处不重复）：\n"
+        + body
+    )
 
 
 def long_memory_has_any_content(record: Any) -> bool:

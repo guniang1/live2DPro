@@ -102,6 +102,7 @@ CREATE TABLE `live2d_tts_refer` (
 CREATE TABLE `user_profile` (
   `profile_id` INT NOT NULL AUTO_INCREMENT COMMENT '画像ID',
   `user_id` INT NOT NULL COMMENT '关联用户ID',
+  `display_name` VARCHAR(64) DEFAULT NULL COMMENT '用户自称/常用称呼',
   `user_tags` VARCHAR(255) DEFAULT NULL COMMENT '用户标签(考研党/压力大/高数薄弱)',
   `emotion_state` VARCHAR(30) DEFAULT NULL COMMENT '当前情感状态',
   `preferences` TEXT DEFAULT NULL COMMENT '用户偏好',

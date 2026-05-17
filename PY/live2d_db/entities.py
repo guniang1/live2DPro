@@ -69,6 +69,7 @@ class Persona:
 class UserProfile:
     profile_id: Optional[int] = None
     user_id: int = 0
+    display_name: Optional[str] = None
     user_tags: Optional[str] = None
     emotion_state: Optional[str] = None
     preferences: Optional[str] = None

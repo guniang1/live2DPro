@@ -81,6 +81,7 @@ from .http_schemas import (
     RemindSchedulerScanNowPublic,
     RemindTriggerUpdate,
     UserCreate,
+    UserProfileConsolidateNowPublic,
     UserProfilePublic,
     UserProfileUpsert,
     UserPublic,
@@ -103,6 +104,7 @@ from .repositories import (
     UserProfileRepository,
     UserRepository,
 )
+from .package_purge import purge_user_package_data
 from .scan_package import infer_asset_type
 from . import memory_layers as _memory_layers
 from .redis_factory import get_redis_client as _redis_factory_get_client
@@ -447,6 +449,7 @@ def _profile_pub(p: UserProfile) -> UserProfilePublic:
     return UserProfilePublic(
         profile_id=p.profile_id,
         user_id=p.user_id,
+        display_name=p.display_name,
         user_tags=p.user_tags,
         emotion_state=p.emotion_state,
         preferences=p.preferences,
@@ -797,7 +800,7 @@ async def long_memories_consolidate_now(
         description="当前模型包键，与聊天一致；省略则按 default",
     ),
 ) -> LongMemoryConsolidateNowPublic:
-    """立即执行一轮周期概要更新（写入 long_memory.period_overview），不受后台定时任务 24h 最短间隔限制。"""
+    """立即执行一轮周期概要滚动合并（写入 long_memory.period_overview），不受后台 24h 最短间隔限制；可压缩历史堆叠段。"""
     from live2d_db.long_memory_consolidator import consolidate_one
 
     pkg_norm = _normalize_package_key((package_key or "").strip() or "default", fallback="default")
@@ -831,6 +834,19 @@ def long_memories_update(memory_id: int, body: LongMemoryUpdate, db: Db) -> Long
     LongMemoryRepository.update(db, m)
     got = LongMemoryRepository.get_by_id(db, memory_id)
     assert got
+    if long_memory_has_any_content(got):
+        client = _get_redis_client()
+        if client is not None:
+            try:
+                txt = merge_long_memory_record_for_prompt(got)
+                _memory_layers.write_long_memory_text(
+                    client,
+                    int(got.user_id),
+                    str(got.package_key or "default"),
+                    txt,
+                )
+            except Exception:
+                logger.exception("长期记忆更新后写 Redis 失败 memory_id=%s", memory_id)
     return _mem_pub(got)
 
 
@@ -1017,6 +1033,7 @@ def user_profiles_get_by_user(user_id: int, db: Db) -> UserProfilePublic:
 def user_profiles_upsert(user_id: int, body: UserProfileUpsert, db: Db) -> UserProfilePublic:
     p = UserProfile(
         user_id=user_id,
+        display_name=body.display_name,
         user_tags=body.user_tags,
         emotion_state=body.emotion_state,
         preferences=body.preferences,
@@ -1026,6 +1043,21 @@ def user_profiles_upsert(user_id: int, body: UserProfileUpsert, db: Db) -> UserP
     got = UserProfileRepository.get_by_user_id(db, user_id)
     assert got
     return _profile_pub(got)
+
+
+@router.post("/user-profiles/consolidate-now", response_model=UserProfileConsolidateNowPublic)
+async def user_profiles_consolidate_now(
+    user_id: int = Query(..., ge=1),
+) -> UserProfileConsolidateNowPublic:
+    """立即合并用户画像（近 24h 内全部 ``chat_session``，跨包），不受后台最短间隔限制。"""
+    from utils.user_profile_refresh import consolidate_user_profile
+
+    def _run() -> bool:
+        with connection_ctx() as conn:
+            return consolidate_user_profile(conn, user_id, manual=True)
+
+    updated = await asyncio.to_thread(_run)
+    return UserProfileConsolidateNowPublic(ok=True, updated=updated)
 
 
 @router.get("/user-profiles/{profile_id}", response_model=UserProfilePublic)
@@ -1269,14 +1301,10 @@ def live2d_model_assets_delete_package(
     db: Db,
     user_id: int = Query(..., ge=1, description="仅删除该用户在该包下的索引行"),
 ) -> OkRows:
-    n = Live2dModelAssetRepository.delete_by_package_key(db, package_key, user_id)
-    pkg_norm = _normalize_package_key(package_key)
-    PersonaRepository.delete_by_user_and_package(db, user_id, package_key)
     rc = _get_redis_client()
-    if rc:
-        _memory_layers.delete_mimo_director_persona_cached(rc, user_id, pkg_norm)
+    stats = purge_user_package_data(db, user_id, package_key, redis_cli=rc)
     invalidate_live2d_catalog_cache(user_id, package_key)
-    return OkRows(affected_rows=n)
+    return OkRows(affected_rows=int(stats.get("model_assets", 0)))
 
 
 @router.get("/live2d-tts-refers", response_model=list[Live2dTtsReferPublic])

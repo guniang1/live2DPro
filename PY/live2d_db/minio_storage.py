@@ -132,6 +132,24 @@ def upload_bytes(
     return oname, object_public_url(b, object_name)
 
 
+def delete_object(object_name: str, *, bucket: Optional[str] = None) -> None:
+    """删除单个对象；不存在时忽略。"""
+    c = get_minio_client()
+    b = bucket or get_bucket_name()
+    oname = object_name.lstrip("/")
+    try:
+        c.remove_object(b, oname)
+    except S3Error as exc:
+        if getattr(exc, "code", "") not in ("NoSuchKey", "NoSuchObject"):
+            raise
+    try:
+        from .minio_redis_cache import invalidate_object_cache
+
+        invalidate_object_cache(oname, bucket=b)
+    except Exception:
+        pass
+
+
 def presigned_get_url(
     object_name: str,
     *,

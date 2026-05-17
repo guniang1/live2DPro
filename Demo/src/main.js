@@ -25,6 +25,7 @@ import {
 } from './api/ws.js';
 import { fetchChatSessionsForPanel } from './api/chatSessions.js';
 import { triggerLongMemoryConsolidateNow } from './api/longMemory.js';
+import { triggerUserProfileConsolidateNow } from './api/userProfile.js';
 import { triggerRemindScanNow } from './api/remindTriggers.js';
 import { getLive2dPackage, getUserId, setLive2dPackage, setUserId } from './api/wsConfig.js';
 import { getAssetDownloadUrl, getModelAssets, getModelPackages } from './api/assetUpload.js';
@@ -573,6 +574,64 @@ window.addEventListener(
                         e && e.message
                             ? String(e.message)
                             : '触发长期记忆总结失败，请确认后端与 Ollama 可用。'
+                    );
+                }
+            });
+        }
+
+        const userProfileBtn = document.getElementById('user-profile-consolidate-btn');
+        let userProfileConsolidateResetTimer = null;
+        if (userProfileBtn) {
+            userProfileBtn.addEventListener('click', async () => {
+                const defaultLabel =
+                    userProfileBtn.getAttribute('data-default-label')?.trim() ||
+                    userProfileBtn.textContent.trim() ||
+                    '更新用户画像';
+
+                let uid = getUserId();
+                try {
+                    const rawAuth = localStorage.getItem('live2d_info');
+                    const la = rawAuth ? JSON.parse(rawAuth) : null;
+                    if (la?.user_id != null) {
+                        uid = Number(la.user_id);
+                    }
+                } catch (_) {
+                    /* ignore */
+                }
+                if (!uid || !Number.isInteger(uid) || uid < 1) {
+                    alert('请先登录后再更新用户画像。');
+                    return;
+                }
+
+                if (userProfileConsolidateResetTimer) {
+                    clearTimeout(userProfileConsolidateResetTimer);
+                    userProfileConsolidateResetTimer = null;
+                }
+
+                userProfileBtn.disabled = true;
+                userProfileBtn.setAttribute('aria-busy', 'true');
+                userProfileBtn.textContent = '更新中…';
+
+                try {
+                    const data = await triggerUserProfileConsolidateNow({ userId: uid });
+                    console.info('[user-profile consolidate-now]', data);
+                    userProfileBtn.textContent = data.updated
+                        ? '已更新画像'
+                        : '暂无可更新';
+                    userProfileConsolidateResetTimer = setTimeout(() => {
+                        userProfileBtn.textContent = defaultLabel;
+                        userProfileBtn.disabled = false;
+                        userProfileBtn.removeAttribute('aria-busy');
+                        userProfileConsolidateResetTimer = null;
+                    }, 3600);
+                } catch (e) {
+                    userProfileBtn.textContent = defaultLabel;
+                    userProfileBtn.disabled = false;
+                    userProfileBtn.removeAttribute('aria-busy');
+                    alert(
+                        e && e.message
+                            ? String(e.message)
+                            : '触发用户画像更新失败，请确认后端与 Ollama 可用。'
                     );
                 }
             });

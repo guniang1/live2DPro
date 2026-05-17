@@ -366,11 +366,12 @@ def read_long_memory_text(redis_cli: Any, user_id: int, package_key: str) -> str
 
 
 def format_long_memory_block(text: str) -> str:
+    """注入 prompt 时截断；保留尾部以优先展示最新脉络。"""
     lim = long_memory_prompt_max_chars()
     s = (text or "").strip()
     if len(s) <= lim:
         return s
-    return s[: max(1, lim - 1)].rstrip() + "…"
+    return "…" + s[-(lim - 1) :].lstrip()
 
 
 def delete_memory_keys(redis_cli: Any, user_id: int, package_key: str) -> None:

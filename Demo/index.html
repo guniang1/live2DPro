@@ -533,6 +533,7 @@
     #upload-tts-btn,
     #upload-character-btn,
     #long-memory-consolidate-btn,
+    #user-profile-consolidate-btn,
     #logout-btn {
       height: 38px;
       padding: 0 14px;
@@ -552,12 +553,14 @@
     #upload-model-btn:hover,
     #upload-tts-btn:hover,
     #upload-character-btn:hover,
-    #long-memory-consolidate-btn:hover {
+    #long-memory-consolidate-btn:hover,
+    #user-profile-consolidate-btn:hover {
       background: rgba(210, 206, 200, 0.95);
       border-color: rgba(90, 85, 80, 0.12);
     }
 
-    #long-memory-consolidate-btn:disabled {
+    #long-memory-consolidate-btn:disabled,
+    #user-profile-consolidate-btn:disabled {
       opacity: 0.65;
       cursor: not-allowed;
       transform: none;
@@ -666,11 +669,20 @@
       <button
         type="button"
         id="long-memory-consolidate-btn"
-        data-default-label="总结长期记忆"
-        title="基于近期对话立即生成/追加长期记忆摘要（需 Ollama；不受后台 24 小时周期限制；无窗口内会话或模型未产出时不会写入）"
-        aria-label="总结长期记忆：根据近期对话立即更新周期概要"
+        data-default-label="更新长期记忆"
+        title="根据自上次存档以来的新对话滚动合并长期概要（需 Ollama；可压缩历史堆叠段；无新对话且无需压缩时可能不写入）"
+        aria-label="更新长期记忆：滚动合并近期对话脉络"
       >
-        总结长期记忆
+        更新长期记忆
+      </button>
+      <button
+        type="button"
+        id="user-profile-consolidate-btn"
+        data-default-label="更新用户画像"
+        title="根据近 24 小时内全部对话合并用户画像（需 Ollama；跨模型包；无对话时可能不写入）"
+        aria-label="更新用户画像：合并称呼与偏好等稳定信息"
+      >
+        更新用户画像
       </button>
 
       <div class="toolbar-divider" aria-hidden="true"></div>

@@ -240,6 +240,18 @@ class ChatSessionRepository:
             return int(cur.execute(sql, (session_id,)))
 
     @staticmethod
+    def delete_by_user_package_keys(
+        conn: pymysql.connections.Connection, user_id: int, package_keys: Sequence[str]
+    ) -> int:
+        keys = [str(k) for k in package_keys if str(k).strip()]
+        if not keys:
+            return 0
+        placeholders = ", ".join(["%s"] * len(keys))
+        sql = f"DELETE FROM chat_session WHERE user_id = %s AND package_key IN ({placeholders})"
+        with conn.cursor() as cur:
+            return int(cur.execute(sql, (user_id, *keys)))
+
+    @staticmethod
     def get_by_id(conn: pymysql.connections.Connection, session_id: int) -> Optional[ChatSession]:
         sql = "SELECT * FROM chat_session WHERE session_id = %s"
         with conn.cursor() as cur:
@@ -576,6 +588,18 @@ class LongMemoryRepository:
             return int(cur.execute(sql, (memory_id,)))
 
     @staticmethod
+    def delete_by_user_package_keys(
+        conn: pymysql.connections.Connection, user_id: int, package_keys: Sequence[str]
+    ) -> int:
+        keys = [str(k) for k in package_keys if str(k).strip()]
+        if not keys:
+            return 0
+        placeholders = ", ".join(["%s"] * len(keys))
+        sql = f"DELETE FROM long_memory WHERE user_id = %s AND package_key IN ({placeholders})"
+        with conn.cursor() as cur:
+            return int(cur.execute(sql, (user_id, *keys)))
+
+    @staticmethod
     def _row(row: Dict[str, Any]) -> LongMemory:
         cells = LongMemoryRepository._row_dim_cells(row)
         return LongMemory(
@@ -871,13 +895,20 @@ class UserProfileRepository:
     @staticmethod
     def insert(conn: pymysql.connections.Connection, p: UserProfile) -> int:
         sql = (
-            "INSERT INTO user_profile (user_id, user_tags, emotion_state, preferences, trouble_events) "
-            "VALUES (%s, %s, %s, %s, %s)"
+            "INSERT INTO user_profile (user_id, display_name, user_tags, emotion_state, preferences, trouble_events) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)"
         )
         with conn.cursor() as cur:
             cur.execute(
                 sql,
-                (p.user_id, p.user_tags, p.emotion_state, p.preferences, p.trouble_events),
+                (
+                    p.user_id,
+                    p.display_name,
+                    p.user_tags,
+                    p.emotion_state,
+                    p.preferences,
+                    p.trouble_events,
+                ),
             )
             return int(cur.lastrowid)
 
@@ -902,15 +933,50 @@ class UserProfileRepository:
     @staticmethod
     def update(conn: pymysql.connections.Connection, p: UserProfile) -> int:
         sql = (
-            "UPDATE user_profile SET user_tags=%s, emotion_state=%s, preferences=%s, trouble_events=%s "
+            "UPDATE user_profile SET display_name=%s, user_tags=%s, emotion_state=%s, preferences=%s, trouble_events=%s "
             "WHERE profile_id=%s"
         )
         with conn.cursor() as cur:
             n = cur.execute(
                 sql,
-                (p.user_tags, p.emotion_state, p.preferences, p.trouble_events, p.profile_id),
+                (
+                    p.display_name,
+                    p.user_tags,
+                    p.emotion_state,
+                    p.preferences,
+                    p.trouble_events,
+                    p.profile_id,
+                ),
             )
         return int(n)
+
+    @staticmethod
+    def list_candidates_for_profile_refresh(
+        conn: pymysql.connections.Connection,
+        activity_window_seconds: int,
+        min_gap_since_last_refresh_seconds: int,
+    ) -> List[int]:
+        """24h 画像刷新候选 ``user_id``：近窗内有会话，且距上次 ``update_time`` 已满最短间隔。"""
+        safe_activity = max(60, min(int(activity_window_seconds), 86400 * 14))
+        safe_gap = max(60, min(int(min_gap_since_last_refresh_seconds), 86400 * 14))
+        sql = (
+            "SELECT DISTINCT cs.user_id AS user_id FROM chat_session cs "
+            "LEFT JOIN user_profile up ON up.user_id = cs.user_id "
+            "WHERE cs.create_time >= NOW() - INTERVAL %s SECOND "
+            "AND (up.update_time IS NULL OR up.update_time <= NOW() - INTERVAL %s SECOND)"
+        )
+        with conn.cursor() as cur:
+            cur.execute(sql, (safe_activity, safe_gap))
+            rows = cur.fetchall()
+        out: List[int] = []
+        seen: set[int] = set()
+        for r in rows:
+            uid = int(r["user_id"])
+            if uid in seen:
+                continue
+            seen.add(uid)
+            out.append(uid)
+        return out
 
     @staticmethod
     def upsert_by_user_id(conn: pymysql.connections.Connection, p: UserProfile) -> int:
@@ -937,6 +1003,7 @@ class UserProfileRepository:
         return UserProfile(
             profile_id=row["profile_id"],
             user_id=row["user_id"],
+            display_name=row.get("display_name"),
             user_tags=row.get("user_tags"),
             emotion_state=row.get("emotion_state"),
             preferences=row.get("preferences"),
@@ -997,6 +1064,23 @@ class RemindTriggerRepository:
         sql = "DELETE FROM remind_trigger WHERE trigger_id = %s"
         with conn.cursor() as cur:
             return int(cur.execute(sql, (trigger_id,)))
+
+    @staticmethod
+    def delete_by_user_package_keys(
+        conn: pymysql.connections.Connection, user_id: int, package_keys: Sequence[str]
+    ) -> int:
+        """删除关联到该包 ``chat_session`` 的提醒行（先于会话删除调用）。"""
+        keys = [str(k) for k in package_keys if str(k).strip()]
+        if not keys:
+            return 0
+        placeholders = ", ".join(["%s"] * len(keys))
+        sql = (
+            f"DELETE FROM remind_trigger WHERE session_id IN ("
+            f"SELECT session_id FROM chat_session WHERE user_id = %s AND package_key IN ({placeholders})"
+            f")"
+        )
+        with conn.cursor() as cur:
+            return int(cur.execute(sql, (user_id, *keys)))
 
     @staticmethod
     def get_by_id(conn: pymysql.connections.Connection, trigger_id: int) -> Optional[RemindTrigger]:
