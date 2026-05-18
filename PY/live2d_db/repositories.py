@@ -1169,25 +1169,20 @@ class RemindTriggerRepository:
         return int(n)
 
     @staticmethod
-    def reclaim_stale_delivering(
-        conn: pymysql.connections.Connection, *, stale_seconds: int
-    ) -> int:
-        """将长时间卡在 ``is_triggered=2`` 的记录收回为待投递（进程崩溃或异常中断时）。"""
-        sec = max(60, int(stale_seconds))
-        sql = (
-            "UPDATE remind_trigger SET is_triggered = 0, delivery_started_at = NULL "
-            "WHERE is_triggered = 2 AND delivery_started_at IS NOT NULL "
-            "AND delivery_started_at < DATE_SUB(NOW(), INTERVAL %s SECOND)"
-        )
+    def is_pending(conn: pymysql.connections.Connection, trigger_id: int) -> bool:
+        sql = "SELECT is_triggered FROM remind_trigger WHERE trigger_id = %s"
         with conn.cursor() as cur:
-            n = cur.execute(sql, (sec,))
-        return int(n)
+            cur.execute(sql, (trigger_id,))
+            row = cur.fetchone()
+        if not row:
+            return False
+        return int(row["is_triggered"]) == 0
 
     @staticmethod
-    def begin_remind_delivery(conn: pymysql.connections.Connection, trigger_id: int) -> bool:
-        """待投递 ``0→2``，并记下投递开始时刻；仅当仍为待投递时返回 True（互斥占用，尚未视为已触发）。"""
+    def mark_remind_delivered(conn: pymysql.connections.Connection, trigger_id: int) -> bool:
+        """WebSocket 已成功下发关怀 JSON 后 ``0→1``。"""
         sql = (
-            "UPDATE remind_trigger SET is_triggered = 2, delivery_started_at = NOW() "
+            "UPDATE remind_trigger SET is_triggered = 1 "
             "WHERE trigger_id = %s AND is_triggered = 0"
         )
         with conn.cursor() as cur:
@@ -1195,36 +1190,12 @@ class RemindTriggerRepository:
         return int(n) == 1
 
     @staticmethod
-    def finish_remind_delivery(conn: pymysql.connections.Connection, trigger_id: int) -> bool:
-        """已向客户端成功下发 ``remind_trigger`` JSON 正文后 ``2→1``（清空投递时刻）。"""
-        sql = (
-            "UPDATE remind_trigger SET is_triggered = 1, delivery_started_at = NULL "
-            "WHERE trigger_id = %s AND is_triggered = 2"
-        )
+    def normalize_legacy_delivering(conn: pymysql.connections.Connection) -> int:
+        """升级：将历史 ``is_triggered=2`` 收回为待投递 ``0``。"""
+        sql = "UPDATE remind_trigger SET is_triggered = 0 WHERE is_triggered = 2"
         with conn.cursor() as cur:
-            n = cur.execute(sql, (trigger_id,))
-        return int(n) == 1
-
-    @staticmethod
-    def release_remind_delivery(conn: pymysql.connections.Connection, trigger_id: int) -> int:
-        """WebSocket 发送失败等：``2→0``，下次扫描或重连可再试。"""
-        sql = (
-            "UPDATE remind_trigger SET is_triggered = 0, delivery_started_at = NULL "
-            "WHERE trigger_id = %s AND is_triggered = 2"
-        )
-        with conn.cursor() as cur:
-            n = cur.execute(sql, (trigger_id,))
+            n = cur.execute(sql)
         return int(n)
-
-    @staticmethod
-    def claim_pending_trigger(conn: pymysql.connections.Connection, trigger_id: int) -> bool:
-        """兼容旧名：等同于 :meth:`begin_remind_delivery`。"""
-        return RemindTriggerRepository.begin_remind_delivery(conn, trigger_id)
-
-    @staticmethod
-    def release_trigger_claim(conn: pymysql.connections.Connection, trigger_id: int) -> int:
-        """兼容旧名：等同于 :meth:`release_remind_delivery`。"""
-        return RemindTriggerRepository.release_remind_delivery(conn, trigger_id)
 
     @staticmethod
     def list_pending_for_user_before(
@@ -1255,7 +1226,6 @@ class RemindTriggerRepository:
             session_id=row.get("session_id"),
             trigger_content=row["trigger_content"],
             is_triggered=int(row["is_triggered"]),
-            delivery_started_at=_parse_dt(row.get("delivery_started_at")),
             create_time=_parse_dt(row.get("create_time")),
         )
 

@@ -226,7 +226,7 @@ class RemindTriggerCreate(BaseModel):
     trigger_time: datetime
     session_id: Optional[int] = Field(
         None,
-        description="可选：绑定 chat_session.session_id；投递时用该轮对话作为语境（对话抽取会自动写入）",
+        description="绑定 chat_session.session_id；投递时用该轮对话作为语境（对话抽取会自动写入）",
     )
     trigger_content: str = Field(
         ...,
@@ -276,6 +276,7 @@ class RemindSchedulerScanNowPublic(BaseModel):
     delivered: int = 0
     released_no_ws: int = 0
     stale_reclaimed: int = 0
+    idle_chitchat_delivered: int = 0
 
 
 class OkRows(BaseModel):

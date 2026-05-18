@@ -489,7 +489,7 @@ def mimo_tts(
         ``MIMO_TTS_STYLE``（可选，V2.5 整体风格标签 ``(风格)正文``）、
         ``MIMO_TTS_CONTEXT``（可选，克隆时优先作为 user 侧「导演/语气」指令）、
         ``MIMO_TTS_USER_PROMPT``（预置模式默认 user 句；克隆无 CONTEXT 时可作 user）。
-        ``MIMO_TTS_SYSTEM_PROMPT``（可选）：携带数据库人设导演（``user_director_prompt`` 非空且非
+        ``MIMO_TTS_SYSTEM_PROMPT``：携带数据库人设导演（``user_director_prompt`` 非空且非
         ``speech_assistant_only``）时，作为 **user** 消息前缀（官方 TTS 模型不接受 ``role=system``）；
         不设则默认为「你是语音合成助手，请按照【人设】与【语气】合成语音。」
         ``MIMO_TTS_WS_USER_HINT``（仅在 ``speech_assistant_only=True`` 时生效）：写入 **user** 的固定短句，

@@ -3,9 +3,9 @@
 库表 ``remind_trigger.trigger_content`` 存**情景概要**（抽取阶段由瞬时/短期记忆等主料生成的五维备忘：用户时间、地点、角色、事件、氛围）；投递时由 LLM **重新撰写**面向用户的台词。
 写入 LLM **User** 消息的拼装顺序（与论文 6.5.1 一致）：
 
-1. 人设块（可选）：从 MySQL 表 ``persona`` 经 ``PersonaRepository.resolve_persona_for_package`` 读取当前包的 ``tone_style`` / ``character_desc``；
-2. 用户画像块（可选）：``USER_PROFILE_IN_CHAT`` 未关闭且画像存在非空字段时，``format_profile_for_chat_system`` → ``【用户画像】``；
-3. 当前对话瞬时记忆（可选）：与 ``/ws/chat`` 相同 ``(user_id, package_key)`` 分桶，Redis List 按时间顺序的多轮 user/assistant 原文，**不含**短期压缩层；
+1. 人设块：从 MySQL 表 ``persona`` 经 ``PersonaRepository.resolve_persona_for_package`` 读取当前包的 ``tone_style`` / ``character_desc``；
+2. 用户画像块：``USER_PROFILE_IN_CHAT`` 未关闭且画像存在非空字段时，``format_profile_for_chat_system`` → ``【用户画像】``；
+3. 当前对话瞬时记忆：与 ``/ws/chat`` 相同 ``(user_id, package_key)`` 分桶，Redis List 按时间顺序的多轮 user/assistant 原文，**不含**短期压缩层；
 4. **关怀类型**：``trigger_type``；
 5. **情景概要**：库内 ``trigger_content``（无则正文写 ``未提供``）；
 6. **关联对话原文**：``session_id`` → ``chat_session.user_input`` / ``ai_reply``；无有效 ``session_id`` 或无法读取则正文写 ``未绑定``。
@@ -296,6 +296,7 @@ def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
         return ""
 
     scenario = (t.trigger_content or "").strip()
+    is_idle_chitchat = (t.trigger_type or "").strip() == "随机闲聊"
     session_text = _session_dialogue_prompt_block(t)
     pkg = (package_key or "").strip() or "default"
     memory_block = _redis_instant_memory_prompt_block(int(t.user_id), pkg)
@@ -324,9 +325,16 @@ def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
                 t.user_id,
             )
 
-    if not scenario and not session_text and not memory_block:
+    if not is_idle_chitchat and not scenario and not session_text and not memory_block:
         logger.info(
             "关怀话术跳过：情景、关联对话与瞬时记忆均为空 trigger_id=%s user_id=%s",
+            t.trigger_id,
+            t.user_id,
+        )
+        return ""
+    if is_idle_chitchat and not scenario:
+        logger.info(
+            "空闲闲聊跳过：话题种子为空 trigger_id=%s user_id=%s",
             t.trigger_id,
             t.user_id,
         )
@@ -334,7 +342,7 @@ def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
 
     system = (
         "【绝对禁止】不许说「X分钟后我会……」「稍后我将……」「我等会儿……」；"
-        "不许在输出里出现「【日常关怀】」「【生日】」等类型标签。\n"
+        "不许在输出里出现「【日常关怀】」「【生日】」「【随机闲聊】」等类型标签。\n"
         "此刻就是触发当下，直接对用户表达关心，就像朋友突然想起来搭一句话。\n\n"
         "你是 Live2D 数字人，也就是**当前这个角色本人**，正在对用户直接开口说话。\n"
         "**叙事视角**：全程用第一人称「我」对「你」讲，像在发语音/打字聊天；**禁止**小说旁白或第三者口吻描写你自己。"
@@ -353,6 +361,12 @@ def generate_remind_delivery_message(t: RemindTrigger, package_key: str) -> str:
         "勿嵌套复述情景里的整句草稿；勿照搬情景中带「N 分钟前/后」等易造成时间悖论的措辞；"
         "勿输出「定时关怀」「预约提醒」等机器话术。"
     )
+    if is_idle_chitchat:
+        system += (
+            "\n\n【本次为空闲闲聊】用户已有一段时间没有主动发消息，请你像朋友一样主动开口，"
+            "围绕「情景详细描述」中的随机话题方向自然延伸，可提问、接话或轻松吐槽；"
+            "不要提及「系统」「空闲检测」「五分钟」等元信息。"
+        )
     parts: list[str] = []
     if persona:
         parts.append(persona)

@@ -13,7 +13,8 @@ class RemindDeliverOutcome(IntEnum):
 
     JSON_SENT = 1  # 已成功下发 remind_trigger JSON（含非空 delivery_message）
     TRANSPORT_FAILED = 2  # 无在线连接或 JSON 发送失败
-    SKIPPED_NO_PAYLOAD = 3  # 未下发 JSON（类型为空或正文为空等）；占用应从 2 释放回 0，不得标为已触发
+    SKIPPED_NO_PAYLOAD = 3  # 未下发 JSON（类型为空或正文为空等）；保持 is_triggered=0 待重试
+    ALREADY_HANDLED = 4  # 已非待投递（如并发路径已成功置 1）
 
 
 @dataclass
@@ -86,7 +87,6 @@ class RemindTrigger:
     session_id: Optional[int] = None
     trigger_content: str = ""
     is_triggered: int = 0
-    delivery_started_at: Optional[datetime] = None
     create_time: Optional[datetime] = None
 
 

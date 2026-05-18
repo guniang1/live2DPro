@@ -116,6 +116,16 @@ def _register_chat_ws_for_user(user_id: int, websocket: WebSocket) -> None:
         lst.append(websocket)
 
 
+def list_online_chat_user_ids() -> list[int]:
+    """当前至少有一条已连接 ``/ws/chat`` 的用户 id（去重、升序）。"""
+    out: list[int] = []
+    for uid, conns in _chat_ws_by_user.items():
+        if any(c.client_state == WebSocketState.CONNECTED for c in conns):
+            out.append(int(uid))
+    out.sort()
+    return out
+
+
 def _unregister_chat_ws_for_user(user_id: int, websocket: WebSocket) -> None:
     lst = _chat_ws_by_user.get(user_id)
     if not lst:
@@ -329,7 +339,9 @@ async def broadcast_remind_trigger_to_user(user_id: int, t: RemindTrigger) -> Re
 
 
 async def flush_pending_reminders_for_connection(websocket: WebSocket, user_id: int) -> None:
-    """连接建立后补发该用户已到期且尚未成功投递的提醒（认领 0→2；成功下发 JSON 后 2→1，否则 2→0）。"""
+    """连接建立后补发该用户已到期且 ``is_triggered=0`` 的提醒；成功下发 JSON 后置 **1**。"""
+    from live2d_db.remind_trigger_delivery import deliver_remind_trigger
+
     before = datetime.now()
 
     def _list_u():
@@ -338,47 +350,9 @@ async def flush_pending_reminders_for_connection(websocket: WebSocket, user_id: 
 
     rows = await asyncio.to_thread(_list_u)
     for t in rows:
-        tid = t.trigger_id
-        if tid is None:
-            continue
         if websocket.client_state != WebSocketState.CONNECTED:
             break
-
-        def _claim():
-            with connection_ctx(DbConfig.from_env()) as conn:
-                return RemindTriggerRepository.claim_pending_trigger(conn, tid)
-
-        claimed = await asyncio.to_thread(_claim)
-        if not claimed:
-            continue
-        outcome, hist_text = await _deliver_remind_trigger_on_websocket(
-            websocket, user_id, t
-        )
-        if outcome == RemindDeliverOutcome.JSON_SENT:
-            if hist_text:
-                await asyncio.to_thread(
-                    _persist_remind_delivery_to_chat_session,
-                    user_id,
-                    websocket,
-                    t,
-                    hist_text,
-                )
-
-            def _finish():
-                with connection_ctx(DbConfig.from_env()) as conn:
-                    RemindTriggerRepository.finish_remind_delivery(conn, tid)
-
-            await asyncio.to_thread(_finish)
-        elif outcome in (
-            RemindDeliverOutcome.TRANSPORT_FAILED,
-            RemindDeliverOutcome.SKIPPED_NO_PAYLOAD,
-        ):
-
-            def _release():
-                with connection_ctx(DbConfig.from_env()) as conn:
-                    RemindTriggerRepository.release_trigger_claim(conn, tid)
-
-            await asyncio.to_thread(_release)
+        await deliver_remind_trigger(t, websocket=websocket)
 
 
 def _session_id_from_websocket(websocket: WebSocket) -> str:
@@ -694,7 +668,7 @@ def _tts_parallel_workers() -> int:
 
 
 def _tts_stream_pipeline_slots() -> int | None:
-    """流式朗读流水线并行度（可选）。
+    """流式朗读流水线并行度。
 
     文本侧始终 **顺序** 从 LLM 流取 token 写入同一个 ``text_buffer``；攒满切断条件后 **立即**
     ``sentence_queue.put((index, segment))``，**不** ``await`` 合成完成。若 ``TTS_STREAM_PIPELINE_SLOTS=N``，
@@ -2116,6 +2090,10 @@ async def chat_websocket(websocket: WebSocket):
         _tts_hint,
     )
     await _send_catalog(websocket, session_catalog)
+    if chat_user_id >= 1:
+        from utils.idle_chitchat import touch_user_activity
+
+        touch_user_activity(chat_user_id)
     await flush_pending_reminders_for_connection(websocket, chat_user_id)
 
     async def _chat_stream_invalid() -> bool:
@@ -2158,6 +2136,11 @@ async def chat_websocket(websocket: WebSocket):
                     logger.info("ℹ️ 客户端已断开（空消息提示未发送）")
                     break
                 continue
+
+            if chat_user_id >= 1:
+                from utils.idle_chitchat import touch_user_activity
+
+                touch_user_activity(chat_user_id)
 
             # -------------------------------------------------------------------------
             # Ollama 流式推送：同步阻塞的模型调用 → 异步 WebSocket 推送
