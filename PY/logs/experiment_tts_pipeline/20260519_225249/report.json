@@ -1,0 +1,25 @@
+{
+  "meta": {
+    "created_at": "2026-05-19T14:52:49.407528+00:00",
+    "dry_run": false,
+    "ollama_host": "http://127.0.0.1:11434",
+    "ollama_model": "qwen2.5:3b",
+    "min_chars": 1,
+    "flush_mode": "sentence_end",
+    "mimo_configured": true,
+    "voice_sample": "E:\\CubismDemo\\PY\\assets\\打电话了我没接到抱歉姐姐我现在下去接你.wav",
+    "mimo_preset_only": false
+  },
+  "experiment_1": {
+    "experiment": 1,
+    "question": "简单介绍一下你自己",
+    "tts_text": "简单介绍一下你自己",
+    "ok": true,
+    "error": "",
+    "tts_ms": 1890.9705999976723,
+    "wav_bytes": 76844,
+    "wav_path": "E:\\CubismDemo\\PY\\logs\\experiment_tts_pipeline\\20260519_225249\\exp1\\exp1_single.wav",
+    "started_at": "2026-05-19T14:52:49.407552+00:00"
+  },
+  "experiment_2": null
+}

@@ -1,0 +1,74 @@
+{
+  "meta": {
+    "created_at": "2026-05-19T15:05:59.289979+00:00",
+    "dry_run": true,
+    "ollama_host": "http://127.0.0.1:11434",
+    "ollama_model": "qwen2.5:3b",
+    "min_chars": 1,
+    "flush_mode": "sentence_end",
+    "mimo_configured": true,
+    "voice_sample": "E:\\CubismDemo\\PY\\assets\\打电话了我没接到抱歉姐姐我现在下去接你.wav",
+    "mimo_preset_only": false
+  },
+  "experiment_1": null,
+  "experiment_2": null,
+  "experiment_3": {
+    "experiment": 3,
+    "question": "我今天很难过。",
+    "model": "qwen2.5:3b",
+    "min_chars": 1,
+    "tts_emotion": "悲伤",
+    "mimo_director_prompt": "请用「悲伤」的语气朗读下面这句，情绪要自然、连贯。",
+    "llm_mood_hint": "悲伤",
+    "ok": true,
+    "error": "",
+    "llm_first_token_ms": 50.0,
+    "llm_complete_ms": 200.0,
+    "answer_text": "你好，我是你的虚拟伙伴。我可以陪你聊天、回答问题，也会根据你的情绪调整语气。有什么想聊的吗？",
+    "answer_chars": 46,
+    "segment_count": 3,
+    "total_mimo_ms": 1268.0,
+    "time_to_first_audio_ms": 398.71,
+    "wall_clock_ms": 2.73,
+    "segments": [
+      {
+        "index": 1,
+        "text": "你好，我是你的虚拟伙伴。",
+        "chars": 12,
+        "segment_ready_ms": 2.71,
+        "mimo_ms": 396.0,
+        "cumulative_since_start_ms": 398.71,
+        "wav_bytes": 0,
+        "wav_path": null,
+        "ok": true,
+        "error": ""
+      },
+      {
+        "index": 2,
+        "text": "我可以陪你聊天、回答问题，也会根据你的情绪调整语气。",
+        "chars": 26,
+        "segment_ready_ms": 2.72,
+        "mimo_ms": 508.0,
+        "cumulative_since_start_ms": 510.72,
+        "wav_bytes": 0,
+        "wav_path": null,
+        "ok": true,
+        "error": ""
+      },
+      {
+        "index": 3,
+        "text": "有什么想聊的吗？",
+        "chars": 8,
+        "segment_ready_ms": 2.73,
+        "mimo_ms": 364.0,
+        "cumulative_since_start_ms": 366.73,
+        "wav_bytes": 0,
+        "wav_path": null,
+        "ok": true,
+        "error": ""
+      }
+    ],
+    "started_at": "2026-05-19T15:05:59.289979+00:00"
+  },
+  "tts_emotion_default": "悲伤"
+}

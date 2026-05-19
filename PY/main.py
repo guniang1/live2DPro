@@ -31,6 +31,27 @@ from fastapi.middleware.cors import CORSMiddleware
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import logging
+
+    from utils.tts import (
+        chat_merged_stream_enabled,
+        mimo_tts_configured,
+        normalized_tts_provider,
+        tts_required,
+        tts_unavailable_reason,
+    )
+
+    _log = logging.getLogger("main")
+    if tts_required():
+        if not chat_merged_stream_enabled(None):
+            _log.warning(
+                "TTS 为必选项但当前不可用（%s）；请配置 MIMO_API_KEY 或绑定参考音，"
+                "或设 TTS_OPTIONAL=1 允许仅文本",
+                tts_unavailable_reason(None),
+            )
+        elif normalized_tts_provider() == "mimo" and mimo_tts_configured():
+            _log.info("TTS 必选项：MiMo 已配置（默认预置音色或参考音克隆）")
+
     # 扫描 Resources 下表情/动作，供 LLM 系统提示与 chunk 附带字段
     init_catalog()
     await start_long_memory_consolidator()

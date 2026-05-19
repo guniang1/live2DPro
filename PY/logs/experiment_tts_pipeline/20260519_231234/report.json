@@ -1,0 +1,78 @@
+{
+  "meta": {
+    "created_at": "2026-05-19T15:12:34.282079+00:00",
+    "dry_run": true,
+    "ollama_host": "http://127.0.0.1:11434",
+    "ollama_model": "qwen2.5:3b",
+    "min_chars": 1,
+    "max_chars": 200,
+    "flush_mode": "sentence_end",
+    "mimo_configured": true,
+    "voice_sample": "E:\\CubismDemo\\PY\\assets\\打电话了我没接到抱歉姐姐我现在下去接你.wav",
+    "mimo_preset_only": false
+  },
+  "experiment_1": null,
+  "experiment_2": {
+    "experiment": 2,
+    "question": "测试",
+    "model": "qwen2.5:3b",
+    "min_chars": 1,
+    "max_chars": 200,
+    "tts_emotion": "",
+    "mimo_director_prompt": "",
+    "llm_mood_hint": "",
+    "chat_history_turns": 0,
+    "chat_history_text": "",
+    "ok": true,
+    "error": "",
+    "llm_first_token_ms": 50.0,
+    "llm_complete_ms": 200.0,
+    "answer_text": "你好，我是你的虚拟伙伴。我可以陪你聊天、回答问题，也会根据你的情绪调整语气。有什么想聊的吗？",
+    "answer_chars": 46,
+    "segment_count": 3,
+    "total_mimo_ms": 1268.0,
+    "time_to_first_audio_ms": 401.01,
+    "wall_clock_ms": 5.08,
+    "segments": [
+      {
+        "index": 1,
+        "text": "你好，我是你的虚拟伙伴。",
+        "chars": 12,
+        "segment_ready_ms": 5.01,
+        "mimo_ms": 396.0,
+        "cumulative_since_start_ms": 401.01,
+        "wav_bytes": 0,
+        "wav_path": null,
+        "ok": true,
+        "error": ""
+      },
+      {
+        "index": 2,
+        "text": "我可以陪你聊天、回答问题，也会根据你的情绪调整语气。",
+        "chars": 26,
+        "segment_ready_ms": 5.06,
+        "mimo_ms": 508.0,
+        "cumulative_since_start_ms": 513.06,
+        "wav_bytes": 0,
+        "wav_path": null,
+        "ok": true,
+        "error": ""
+      },
+      {
+        "index": 3,
+        "text": "有什么想聊的吗？",
+        "chars": 8,
+        "segment_ready_ms": 5.07,
+        "mimo_ms": 364.0,
+        "cumulative_since_start_ms": 369.07,
+        "wav_bytes": 0,
+        "wav_path": null,
+        "ok": true,
+        "error": ""
+      }
+    ],
+    "started_at": "2026-05-19T15:12:34.282079+00:00"
+  },
+  "experiment_3": null,
+  "tts_emotion_default": "悲伤"
+}

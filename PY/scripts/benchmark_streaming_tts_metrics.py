@@ -36,7 +36,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-_SENTENCE_PUNC = {"。", "！", "？", ".", "!", "?", ";", "；", "，", ","}
+_SENTENCE_END_PUNC = {"。", "！", "？", ".", "!", "?"}
 
 
 def iter_tokens(text: str) -> list[str]:
@@ -44,15 +44,37 @@ def iter_tokens(text: str) -> list[str]:
     return re.findall(pattern, text)
 
 
+def _split_tokens_prefix_by_max_chars(
+    tokens: list[str], max_chars: int
+) -> tuple[str, list[str]]:
+    if not tokens:
+        return "", []
+    acc: list[str] = []
+    n = 0
+    cut = 0
+    for i, tk in enumerate(tokens):
+        if acc and n + len(tk) > max_chars:
+            break
+        acc.append(tk)
+        n += len(tk)
+        cut = i + 1
+    if not acc:
+        acc = [tokens[0]]
+        cut = 1
+    return "".join(acc).strip(), tokens[cut:]
+
+
 def simulate_flush_wschat(
     stream_chunks: list[str],
     *,
     every_n_end: int,
     min_chars: int,
+    max_chars: int = 200,
 ) -> list[str]:
-    """对齐 wschat：every_n_end<=1 时遇标点且满足 min_chars；否则按标点计数攒批（不套 min_chars）。"""
+    """对齐 wschat：句末即 flush；超 max_chars 强制切。"""
     every_n_end = max(1, min(200, every_n_end))
     min_chars = max(1, min(200, min_chars))
+    max_chars = max(20, min(2000, max_chars))
 
     text_buffer: list[str] = []
     tts_sentence_end_punc_count = 0
@@ -61,21 +83,35 @@ def simulate_flush_wschat(
     for content in stream_chunks:
         for tk in iter_tokens(content):
             text_buffer.append(tk)
-            if tk in _SENTENCE_PUNC:
+            if tk in _SENTENCE_END_PUNC:
                 tts_sentence_end_punc_count += 1
 
+            while text_buffer:
+                raw = "".join(text_buffer)
+                if not raw.strip():
+                    text_buffer.clear()
+                    break
+                if len(raw) > max_chars:
+                    seg, rest = _split_tokens_prefix_by_max_chars(
+                        text_buffer, max_chars
+                    )
+                    if not seg:
+                        break
+                    del text_buffer[:]
+                    text_buffer.extend(rest)
+                    tts_sentence_end_punc_count = 0
+                    flushed.append(seg)
+                    continue
+                break
+
             if every_n_end <= 1:
-                flush_by_punc = tk in _SENTENCE_PUNC
-                if not flush_by_punc:
+                if tk not in _SENTENCE_END_PUNC:
                     continue
                 sentence = "".join(text_buffer).strip()
-                if not sentence:
-                    continue
-                if flush_by_punc and len(sentence) < min_chars:
+                if not sentence or len(sentence) < min_chars:
                     continue
             else:
-                flush_by_batch = tts_sentence_end_punc_count >= every_n_end
-                if not flush_by_batch:
+                if tts_sentence_end_punc_count < every_n_end:
                     continue
                 sentence = "".join(text_buffer).strip()
                 if not sentence:
@@ -85,9 +121,20 @@ def simulate_flush_wschat(
             tts_sentence_end_punc_count = 0
             flushed.append(sentence)
 
-    tail = "".join(text_buffer).strip()
-    if tail:
-        flushed.append(tail)
+    while text_buffer:
+        raw = "".join(text_buffer)
+        if not raw.strip():
+            text_buffer.clear()
+            break
+        if len(raw) > max_chars:
+            seg, rest = _split_tokens_prefix_by_max_chars(text_buffer, max_chars)
+            del text_buffer[:]
+            text_buffer.extend(rest)
+            flushed.append(seg)
+        else:
+            text_buffer.clear()
+            flushed.append(raw.strip())
+
     return flushed
 
 
@@ -150,6 +197,7 @@ def run_scenario(
     stream_chunks: list[str],
     every_n_end: int,
     min_chars: int,
+    max_chars: int,
     base_ms: float,
     per_char_ms: float,
     workers_list: list[int],
@@ -161,6 +209,7 @@ def run_scenario(
         stream_chunks,
         every_n_end=every_n_end,
         min_chars=min_chars,
+        max_chars=max_chars,
     )
     lens = [len(s) for s in segments]
     durs = segment_durations_ms(segments, base_ms=base_ms, per_char_ms=per_char_ms)
@@ -265,7 +314,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="流式 TTS 切段与并行指标（数据输出）")
     ap.add_argument("--text-file", type=Path, default=None, help="UTF-8 全文；默认内置短文")
     ap.add_argument("--chunk-size", type=int, default=3, help="模拟 LLM 流式每包字符数")
-    ap.add_argument("--min-chars", type=int, default=8, help="every_n_end=1 时的 TTS_MIN_CHARS_PER_CHUNK")
+    ap.add_argument("--min-chars", type=int, default=1, help="TTS_MIN_CHARS_PER_CHUNK")
+    ap.add_argument("--max-chars", type=int, default=200, help="TTS_MAX_CHARS_PER_CHUNK")
     ap.add_argument(
         "--every-n-end",
         type=int,
@@ -313,6 +363,7 @@ def main() -> int:
             stream_chunks=stream,
             every_n_end=en,
             min_chars=args.min_chars,
+            max_chars=args.max_chars,
             base_ms=args.latency_base_ms,
             per_char_ms=args.latency_per_char_ms,
             workers_list=args.workers,
@@ -336,6 +387,7 @@ def main() -> int:
             stream,
             every_n_end=primary_en,
             min_chars=args.min_chars,
+            max_chars=args.max_chars,
         )
         live = live_mimo_segments(
             segments,

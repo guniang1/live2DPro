@@ -17,11 +17,16 @@ import urllib.request
 from typing import Optional, Tuple
 
 from utils.tts import (
+    chat_merged_stream_enabled,
+    effective_chat_tts_provider,
+    gpt_sovits_refer_ready,
     gpt_sovits_tts,
     mimo_tts,
     mimo_tts_configured,
     normalized_tts_provider,
     tts_debug_enabled,
+    tts_required,
+    tts_unavailable_reason,
 )
 from live2d_db.connection import connection_ctx
 from live2d_db.package_key_util import normalize_package_key as _normalize_package_key_for_cache
@@ -157,8 +162,11 @@ def _remind_trigger_ws_payload(t: RemindTrigger, *, display_content: str) -> dic
 def _remind_trigger_use_tts() -> bool:
     """是否在投递关怀话术后尝试朗读（遵循 ``TTS_PROVIDER``：MiMo 或 GPT-SoVITS）。
 
+    默认 **必有朗读**（``tts_required()``）：忽略 ``REMIND_TRIGGER_USE_TTS=0``，除非 ``TTS_OPTIONAL=1``。
     ``REMIND_TRIGGER_USE_TTS`` 优先；未设置时沿用 ``REMIND_TRIGGER_USE_MIMO``（兼容旧名）。
     """
+    if tts_required():
+        return True
     raw = (os.getenv("REMIND_TRIGGER_USE_TTS") or "").strip()
     if raw:
         return raw.lower() not in ("0", "false", "no", "off")
@@ -559,8 +567,23 @@ def _tts_speed_default() -> float:
         return 1.0
 
 
+def _mimo_tts_use_emotion_analyze_enabled() -> bool:
+    """是否在 TTS 前额外跑一轮 Ollama 情感分析并写入 ``MIMO_TTS_STYLE``（实验 5a）。
+
+    实验五（``experiment_tts_pipeline``）结论：**默认关闭**。开启会增加约数秒级墙钟，
+    首段音频与全流程均慢于【人设】【语气】短导演（5b），且听感平稳性无优势。
+    线上 ``wschat`` 仅使用 ``_mimo_director_user_prompt_sync``（5b），不读本开关。
+    """
+    raw = (os.getenv("MIMO_TTS_USE_EMOTION_ANALYZE") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def _mimo_ws_include_director_enabled() -> bool:
-    """MiMo 合并流默认附带导演（仅人设 ``character_desc`` + ``tone_style``）。仅当 ``MIMO_TTS_WS_INCLUDE_DIRECTOR`` 显式为 0/false/off 时关闭。"""
+    """MiMo 合并流默认附带导演（仅人设 ``character_desc`` + ``tone_style``，实验五 5b）。
+
+    仅当 ``MIMO_TTS_WS_INCLUDE_DIRECTOR`` 显式为 0/false/off 时关闭。
+    不启用 ``MIMO_TTS_USE_EMOTION_ANALYZE``（实验五 5a，较慢）；见 ``docs/后端项目正文.md`` 附录 J。
+    """
     raw = os.getenv("MIMO_TTS_WS_INCLUDE_DIRECTOR")
     if raw is None:
         return True
@@ -585,7 +608,8 @@ def _mimo_ws_tts_single_shot_enabled() -> bool:
     return s in ("1", "true", "yes", "on")
 
 
-_SENTENCE_PUNC = {"。", "！", "？", ".", "!", "?", ";", "；", "，", ","}
+# 句末标点：流式 TTS 切段；逗号、分号等中间停顿号不触发合成
+_SENTENCE_END_PUNC = {"。", "！", "？", ".", "!", "?"}
 
 
 def _is_wav_header(blob: bytes) -> bool:
@@ -593,57 +617,71 @@ def _is_wav_header(blob: bytes) -> bool:
 
 
 def _tts_min_chars_before_flush() -> int:
-    """遇句末标点时若本段仍短于此字数，暂不送 TTS，继续向 buffer 攒句，减轻「刚播极短一句后长时间等下一段」。"""
+    """遇句末标点（。！？. ! ?）后，本段至少多少字才送 TTS；默认 1=一见句末即合成。
+
+    逗号、顿号、分号等中间停顿号不计入切段条件（见 ``_SENTENCE_END_PUNC``）。
+    若需减轻极短句碎片，可设 ``TTS_MIN_CHARS_PER_CHUNK`` 为更大值（如 8）。
+    """
     raw = (os.getenv("TTS_MIN_CHARS_PER_CHUNK") or "").strip()
     if raw == "":
-        return 8
+        return 1
     try:
         n = int(raw)
     except ValueError:
         return 8
     return max(1, min(200, n))
+
+
+def _tts_max_chars_per_chunk() -> int:
+    """单段 TTS 最大字数；超过后必须在 token 边界强制切段（不等句末标点）。
+
+    环境变量 ``TTS_MAX_CHARS_PER_CHUNK``，默认 200。
+    """
+    raw = (os.getenv("TTS_MAX_CHARS_PER_CHUNK") or "").strip()
+    if raw == "":
+        return 200
+    try:
+        n = int(raw)
+    except ValueError:
+        return 200
+    return max(20, min(2000, n))
+
+
+def _split_tokens_prefix_by_max_chars(
+    tokens: list[str], max_chars: int
+) -> tuple[str, list[str]]:
+    """从 token 列表头部取不超过 ``max_chars`` 的文本，其余 token 作为第二项返回。"""
+    if not tokens:
+        return "", []
+    acc: list[str] = []
+    n = 0
+    cut = 0
+    for i, tk in enumerate(tokens):
+        if acc and n + len(tk) > max_chars:
+            break
+        acc.append(tk)
+        n += len(tk)
+        cut = i + 1
+    if not acc:
+        acc = [tokens[0]]
+        cut = 1
+    return "".join(acc).strip(), tokens[cut:]
 
 
 def _tts_flush_every_n_sentence_end() -> int:
-    """累计多少个标点（见 _SENTENCE_PUNC）后，将当前 buffer 整段送 TTS，并清空 buffer / 计数。
+    """累计多少个 **句末标点**（见 ``_SENTENCE_END_PUNC``）后送 TTS。
 
-    环境变量 ``TTS_FLUSH_EVERY_N_SENTENCE_END``：未设置时 **默认 4**（每 4 个标点一次合成请求）；
-    设为 ``1`` 则恢复「每遇到一个标点即一切」（仍受 ``TTS_MIN_CHARS_PER_CHUNK``）；``≥2`` 则按次数攒批
-    （攒批路径不再套用最短字数门槛）。
+    环境变量 ``TTS_FLUSH_EVERY_N_SENTENCE_END``：未设置时 **默认 1**（每遇到 。！？. ! ? 即切段）；
+    ``≥2`` 则按句末标点次数攒批（攒批路径不再套用最短字数门槛）。逗号、分号不计入。
     """
     raw = (os.getenv("TTS_FLUSH_EVERY_N_SENTENCE_END") or "").strip()
     if raw == "":
-        return 4
+        return 1
     try:
         n = int(raw)
     except ValueError:
         return 4
     return max(1, min(200, n))
-
-
-def _tts_stream_segment_mode() -> str:
-    """流式 TTS 切段策略。
-
-    - ``punctuation``（默认）：按标点 / ``TTS_FLUSH_EVERY_N_SENTENCE_END`` 攒批（原有行为）。
-    - ``chars``：按累计 Unicode 标量个数切段，**不等待标点**，便于测试「边出 token 边合成」。
-      阈值见 ``_tts_stream_flush_char_threshold()``。
-    """
-    raw = (os.getenv("TTS_STREAM_SEGMENT_MODE") or "").strip().lower()
-    if raw in ("chars", "char", "length", "fixed"):
-        return "chars"
-    return "punctuation"
-
-
-def _tts_stream_flush_char_threshold() -> int:
-    """``TTS_STREAM_SEGMENT_MODE=chars`` 时，buffer 达到多少字即送一次 TTS（合成仍走流水线队列，不阻塞收 token）。"""
-    raw = (os.getenv("TTS_STREAM_FLUSH_CHARS") or "").strip()
-    if raw == "":
-        return 16
-    try:
-        n = int(raw)
-    except ValueError:
-        return 16
-    return max(4, min(400, n))
 
 
 def _tts_parallel_workers() -> int:
@@ -1098,7 +1136,11 @@ def _mimo_director_user_prompt_sync(
     scene_location: str = "",
     scene_time: str = "",
 ) -> str:
-    """MiMo：user 侧「导演」——【人设】【语气】+ 可选【场景】（与主对话一致）。
+    """MiMo：user 侧「导演」——仅【人设】【语气】（不含【叙事与现实】/场景时间）。
+
+    对应 TTS 对比实验 **五 b**（推荐默认）：短导演、无回合前情感分析，段间语调更稳、墙钟更短。
+    实验五 a（先 Ollama 抽标签 + ``MIMO_TTS_STYLE``）仅保留在 ``experiment_tts_pipeline``，
+    不接入本函数。详见 ``docs/后端项目正文.md`` 附录 J。
 
     ``_current_user_message`` 保留为调用签名兼容，当前不参与拼接。"""
     persona_role = ""
@@ -1132,15 +1174,6 @@ def _mimo_director_user_prompt_sync(
             )
 
     out = _mimo_director_role_guide_text(persona_role, persona_tone)
-    loc = (scene_location or "").strip()
-    tim = (scene_time or "").strip()
-    if loc or tim:
-        bits: list[str] = []
-        if loc:
-            bits.append(f"角色场景（背景）：{loc}")
-        if tim:
-            bits.append(f"用户真实时间：{tim}")
-        out = "【叙事与现实】" + "；".join(bits) + "\n\n" + out
     try:
         max_total = int(os.getenv("MIMO_TTS_DIRECTOR_MAX_CHARS", "4500"))
     except ValueError:
@@ -2010,7 +2043,7 @@ WebSocket 聊天接口
     - 连接后首条：{"type": "catalog", "package_key": "...", "expression": [...], "motion": [...],
       "expression_paths": [...], "motion_paths": [...]}（各一条，与 LLM 可选范围一致）
     - 流式正文（未配置音色参考时）：主对话模型 **不**输出 ``#emotion#`` / ``#motion#``；若流中偶发出现标签行仍会被剥离（防御性）。专用标签模型（``OLLAMA_LIVE2D_TAGS_MODEL``，未设则同 ``OLLAMA_MODEL``）另请求一次，仅输出两行标签，解析后以 ``{"type":"live2d_tags","text":"#emotion#…"}`` / ``#motion#…`` 下发（catalog 规范化后标识名），**不阻塞**主流式与 TTS。
-    - 流式内容（``TTS_PROVIDER=mimo`` 且已配置 ``MIMO_API_KEY``，或已配置 GPT-SoVITS 参考音频时）：默认按 **标点攒批**（``TTS_FLUSH_EVERY_N_SENTENCE_END``，默认每 4 个标点一次合成）下发 ``{"type":"chunk_audio",...}``，**紧接**一条二进制 WAV；**正文与 TTS 不等待** Live2D 标签行（标签在流中靠后到达时单独 ``live2d_tags`` 推送）。**流水线**：攒满一段即入队，**不等待**该段合成结束即可继续收 token 攒下一段；并行合成路数由 ``TTS_STREAM_PIPELINE_SLOTS``（优先）或 ``TTS_PARALLEL_WORKERS`` / ``TTS_PARALLEL_WORKERS_MIMO`` 决定，前端仍 **按 segment index 递增** 收音频。可选 **按字数切段**（测试「边出 token 边合成」、不依赖标点）：设 ``TTS_STREAM_SEGMENT_MODE=chars``，并用 ``TTS_STREAM_FLUSH_CHARS``（默认 16）控制每段长度。MiMo 音色克隆可按批重复上传参考音频；若希望整轮只请求一次云端合成，设 ``MIMO_TTS_WS_SINGLE_SHOT=1``（全文结束后单次 ``chunk_audio``）。MiMo 默认附带 **导演指令**（仅 MySQL 人设：``character_desc`` / ``tone_style``，对应【人设】【语气】）；对本路由的 MiMo 调用固定 ``merge_env_user_prompts=True``，故 ``MIMO_TTS_CONTEXT`` / ``MIMO_TTS_USER_PROMPT`` 会在附带导演时一并写入云端 **user**；``MIMO_TTS_WS_INCLUDE_DIRECTOR=0`` 可关导演（此时仅 ``MIMO_TTS_WS_USER_HINT`` 等）。
+    - 流式内容（``TTS_PROVIDER=mimo`` 且已配置 ``MIMO_API_KEY``，或已配置 GPT-SoVITS 参考音频时）：按 **句末标点**（。！？. ! ?，``TTS_FLUSH_EVERY_N_SENTENCE_END`` 默认 1=遇一句末即合成；逗号/分号不触发）下发 ``{"type":"chunk_audio",...}``，**紧接**一条二进制 WAV；单段超过 ``TTS_MAX_CHARS_PER_CHUNK``（默认 200）时在 token 边界强制切段。**正文与 TTS 不等待** Live2D 标签行（标签在流中靠后到达时单独 ``live2d_tags`` 推送）。**流水线**：攒满一段即入队，**不等待**该段合成结束即可继续收 token 攒下一段；并行合成路数由 ``TTS_STREAM_PIPELINE_SLOTS``（优先）或 ``TTS_PARALLEL_WORKERS`` / ``TTS_PARALLEL_WORKERS_MIMO`` 决定，前端仍 **按 segment index 递增** 收音频。MiMo 音色克隆可按批重复上传参考音频；若希望整轮只请求一次云端合成，设 ``MIMO_TTS_WS_SINGLE_SHOT=1``（全文结束后单次 ``chunk_audio``）。MiMo 默认附带 **导演指令**（仅 MySQL 人设：``character_desc`` / ``tone_style``，对应【人设】【语气】）；对本路由的 MiMo 调用固定 ``merge_env_user_prompts=True``，故 ``MIMO_TTS_CONTEXT`` / ``MIMO_TTS_USER_PROMPT`` 会在附带导演时一并写入云端 **user**；``MIMO_TTS_WS_INCLUDE_DIRECTOR=0`` 可关导演（此时仅 ``MIMO_TTS_WS_USER_HINT`` 等）。
     - 完成标记：{"type": "done"}
     - 错误信息：{"type": "error", "message": "错误描述"}
     - 定时场景（生日、纪念日、考试等）：``{"type":"remind_trigger","trigger_content":…,"delivery_message":…}``。
@@ -2065,31 +2098,42 @@ async def chat_websocket(websocket: WebSocket):
     tts_refer_runtime = await asyncio.to_thread(
         _load_tts_refer_runtime, chat_user_id, session_catalog.package_key
     )
-    _ttp = normalized_tts_provider()
-    if _ttp == "mimo":
-        _tts_hint = (
-            " MiMo 已配置（预置音色或参考音频样本克隆，见 utils/tts.py / .env）"
-            if mimo_tts_configured()
-            else " MiMo 未配置 MIMO_API_KEY，本轮无朗读"
+    _tts_on = chat_merged_stream_enabled(tts_refer_runtime)
+    _tts_eff = effective_chat_tts_provider(tts_refer_runtime)
+    _tts_hint = (
+        f" 朗读=on({_tts_eff})"
+        if _tts_on
+        else (
+            f" 朗读=off(required={tts_required()}; "
+            f"{tts_unavailable_reason(tts_refer_runtime) or '未知'})"
         )
-    else:
-        _tts_hint = (
-            ""
-            if tts_refer_runtime
-            else "；未配置音色参考，本轮将不调 GPT-SoVITS（可在上传页绑定参考音频，或为 api.py 指定 -dr/-dt/-dl）"
-        )
+    )
     logger.info(
-        "✅ 客户端建立 WebSocket 连接，session=%s user_id=%s package=%s（表情=%d 动作=%d refer=%s tts=%s）%s",
+        "✅ 客户端建立 WebSocket 连接，session=%s user_id=%s package=%s（表情=%d 动作=%d refer=%s tts_provider=%s）%s",
         chat_session,
         chat_user_id,
         session_catalog.package_key,
         len(session_catalog.expression_paths),
         len(session_catalog.motion_paths),
-        "on" if tts_refer_runtime else "off",
-        _ttp,
+        "on" if gpt_sovits_refer_ready(tts_refer_runtime) else "off",
+        normalized_tts_provider(),
         _tts_hint,
     )
     await _send_catalog(websocket, session_catalog)
+    await _try_send_json(
+        websocket,
+        {
+            "type": "tts_status",
+            "enabled": _tts_on,
+            "required": tts_required(),
+            "provider": _tts_eff if _tts_on else normalized_tts_provider(),
+            "message": (
+                f"朗读已启用（{_tts_eff}）"
+                if _tts_on
+                else (tts_unavailable_reason(tts_refer_runtime) or "朗读不可用")
+            ),
+        },
+    )
     if chat_user_id >= 1:
         from utils.idle_chitchat import touch_user_activity
 
@@ -2137,6 +2181,21 @@ async def chat_websocket(websocket: WebSocket):
                     break
                 continue
 
+            if tts_required() and not chat_merged_stream_enabled(tts_refer_runtime):
+                _no_tts = tts_unavailable_reason(tts_refer_runtime) or "朗读不可用"
+                logger.warning(
+                    "拒绝本轮对话：朗读为必选项 session=%s user_id=%s %s",
+                    chat_session,
+                    chat_user_id,
+                    _no_tts,
+                )
+                ok = await _try_send_json(
+                    websocket, {"type": "error", "message": _no_tts}
+                )
+                if not ok:
+                    break
+                continue
+
             if chat_user_id >= 1:
                 from utils.idle_chitchat import touch_user_activity
 
@@ -2169,7 +2228,7 @@ async def chat_websocket(websocket: WebSocket):
                 mimo_director_user_prompt = ""
                 if (
                     _mimo_ws_include_director
-                    and normalized_tts_provider() == "mimo"
+                    and effective_chat_tts_provider(tts_refer_runtime) == "mimo"
                     and mimo_tts_configured()
                 ):
                     mimo_director_user_prompt = await asyncio.to_thread(
@@ -2180,16 +2239,8 @@ async def chat_websocket(websocket: WebSocket):
                         scene_location=scene_location,
                         scene_time=scene_time,
                     )
-                _ttp = normalized_tts_provider()
-                if _ttp == "mimo":
-                    merged_stream = mimo_tts_configured()
-                else:
-                    merged_stream = bool(
-                        tts_refer_runtime
-                        and tts_refer_runtime.get("refer_wav_path")
-                        and tts_refer_runtime.get("prompt_text")
-                        and tts_refer_runtime.get("prompt_language")
-                    )
+                merged_stream = chat_merged_stream_enabled(tts_refer_runtime)
+                _effective_tts = effective_chat_tts_provider(tts_refer_runtime)
                 _mimo_ws_single_shot = (
                     merged_stream
                     and _ttp == "mimo"
@@ -2319,8 +2370,6 @@ async def chat_websocket(websocket: WebSocket):
                 tts_speed = _tts_speed_default()
                 tts_lang = os.getenv("TTS_TEXT_LANGUAGE", "zh")
                 tts_workers_n = _effective_tts_pipeline_workers()
-                _tts_seg_mode = _tts_stream_segment_mode()
-                _tts_char_flush_n = _tts_stream_flush_char_threshold()
 
                 text_buffer: list[str] = []
                 tts_sentence_end_punc_count = 0
@@ -2451,13 +2500,8 @@ async def chat_websocket(websocket: WebSocket):
                         idx, sentence = item
                         if await _chat_stream_invalid():
                             break
-                        refer_ok = (
-                            bool(tts_refer_runtime)
-                            and bool(tts_refer_runtime.get("refer_wav_path"))
-                            and bool(tts_refer_runtime.get("prompt_text"))
-                            and bool(tts_refer_runtime.get("prompt_language"))
-                        )
-                        _wp = normalized_tts_provider()
+                        refer_ok = gpt_sovits_refer_ready(tts_refer_runtime)
+                        _wp = _effective_tts
                         if _wp == "mimo":
                             if not mimo_tts_configured():
                                 wav = b""
@@ -2589,44 +2633,45 @@ async def chat_websocket(websocket: WebSocket):
                         if _mimo_ws_single_shot:
                             return True
 
-                        if _tts_seg_mode == "chars":
-                            for tk in iter_tokens(visible):
-                                text_buffer.append(tk)
-                                sentence_raw = "".join(text_buffer)
-                                if len(sentence_raw.strip()) < _tts_char_flush_n:
-                                    continue
-                                sentence = sentence_raw.strip()
-                                if not sentence:
-                                    continue
-                                text_buffer.clear()
-                                tts_sentence_end_punc_count = 0
-                                tts_sentence_index += 1
-                                await sentence_queue.put(
-                                    (tts_sentence_index, sentence)
-                                )
-                            return True
-
                         min_chars = _tts_min_chars_before_flush()
+                        max_chars = _tts_max_chars_per_chunk()
                         every_n_end = _tts_flush_every_n_sentence_end()
                         for tk in iter_tokens(visible):
                             text_buffer.append(tk)
-                            if tk in _SENTENCE_PUNC:
+                            if tk in _SENTENCE_END_PUNC:
                                 tts_sentence_end_punc_count += 1
 
+                            while text_buffer:
+                                raw = "".join(text_buffer)
+                                if not raw.strip():
+                                    text_buffer.clear()
+                                    break
+                                if len(raw) > max_chars:
+                                    sentence, rest = (
+                                        _split_tokens_prefix_by_max_chars(
+                                            text_buffer, max_chars
+                                        )
+                                    )
+                                    if not sentence:
+                                        break
+                                    del text_buffer[:]
+                                    text_buffer.extend(rest)
+                                    tts_sentence_end_punc_count = 0
+                                    tts_sentence_index += 1
+                                    await sentence_queue.put(
+                                        (tts_sentence_index, sentence)
+                                    )
+                                    continue
+                                break
+
                             if every_n_end <= 1:
-                                flush_by_punc = tk in _SENTENCE_PUNC
-                                if not flush_by_punc:
+                                if tk not in _SENTENCE_END_PUNC:
                                     continue
                                 sentence = "".join(text_buffer).strip()
-                                if not sentence:
-                                    continue
-                                if flush_by_punc and len(sentence) < min_chars:
+                                if not sentence or len(sentence) < min_chars:
                                     continue
                             else:
-                                flush_by_batch = (
-                                    tts_sentence_end_punc_count >= every_n_end
-                                )
-                                if not flush_by_batch:
+                                if tts_sentence_end_punc_count < every_n_end:
                                     continue
                                 sentence = "".join(text_buffer).strip()
                                 if not sentence:
@@ -2660,11 +2705,26 @@ async def chat_websocket(websocket: WebSocket):
                             pass
 
                     if not await _chat_stream_invalid() and text_buffer:
-                        sentence = "".join(text_buffer).strip()
-                        if sentence:
-                            tts_sentence_index += 1
-                            await sentence_queue.put((tts_sentence_index, sentence))
-                        text_buffer.clear()
+                        _tail_max = _tts_max_chars_per_chunk()
+                        while text_buffer:
+                            raw = "".join(text_buffer)
+                            if not raw.strip():
+                                text_buffer.clear()
+                                break
+                            if len(raw) > _tail_max:
+                                sentence, rest = _split_tokens_prefix_by_max_chars(
+                                    text_buffer, _tail_max
+                                )
+                                del text_buffer[:]
+                                text_buffer.extend(rest)
+                            else:
+                                sentence = raw.strip()
+                                text_buffer.clear()
+                            if sentence:
+                                tts_sentence_index += 1
+                                await sentence_queue.put(
+                                    (tts_sentence_index, sentence)
+                                )
                         tts_sentence_end_punc_count = 0
 
                     if (

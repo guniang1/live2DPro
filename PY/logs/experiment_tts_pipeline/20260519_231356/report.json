@@ -1,0 +1,68 @@
+{
+  "meta": {
+    "created_at": "2026-05-19T15:13:56.805744+00:00",
+    "dry_run": false,
+    "ollama_host": "http://127.0.0.1:11434",
+    "ollama_model": "qwen2.5:3b",
+    "min_chars": 1,
+    "max_chars": 200,
+    "flush_mode": "sentence_end",
+    "mimo_configured": true,
+    "voice_sample": "E:\\CubismDemo\\PY\\assets\\打电话了我没接到抱歉姐姐我现在下去接你.wav",
+    "mimo_preset_only": false,
+    "chat_history_turns": 4
+  },
+  "experiment_1": null,
+  "experiment_2": null,
+  "experiment_3": null,
+  "experiment_4": {
+    "experiment": 4,
+    "question": "我该怎么办？",
+    "model": "qwen2.5:3b",
+    "min_chars": 1,
+    "max_chars": 200,
+    "tts_emotion": "",
+    "mimo_director_prompt": "【近期对话记录】\n用户：最近总是失眠，一到晚上就忍不住想哭，白天也提不起劲。\n助手：听起来你这段时间很不容易。愿意慢慢说说，是什么让你这么难受吗？\n用户：有个很重要的朋友要搬去外地了，以后可能很难再见，我觉得自己又被丢下了。\n助手：告别确实会让人心里空落落的。你有这样的感受很正常，不用责怪自己。\n\n请结合以上对话的情境与情绪延续性，自然、连贯地朗读下面这句。不要脱离语境，也不要刻意夸张。",
+    "llm_mood_hint": "",
+    "chat_history_turns": 4,
+    "chat_history_text": "用户：最近总是失眠，一到晚上就忍不住想哭，白天也提不起劲。\n助手：听起来你这段时间很不容易。愿意慢慢说说，是什么让你这么难受吗？\n用户：有个很重要的朋友要搬去外地了，以后可能很难再见，我觉得自己又被丢下了。\n助手：告别确实会让人心里空落落的。你有这样的感受很正常，不用责怪自己。",
+    "ok": true,
+    "error": "",
+    "llm_first_token_ms": 3874.269900014042,
+    "llm_complete_ms": 4652.538400012418,
+    "answer_text": "面对这样的情况，可以试着在写信或留言给朋友时表达自己的感受和感激之情。这样不仅能够帮助你释放内心的情感，同时也能让对方感受到你的尊重与珍惜。",
+    "answer_chars": 70,
+    "segment_count": 2,
+    "total_mimo_ms": 5247.95,
+    "time_to_first_audio_ms": 8690.65,
+    "wall_clock_ms": 11024.57,
+    "segments": [
+      {
+        "index": 1,
+        "text": "面对这样的情况，可以试着在写信或留言给朋友时表达自己的感受和感激之情。",
+        "chars": 35,
+        "segment_ready_ms": 5768.73,
+        "mimo_ms": 2919.47,
+        "cumulative_since_start_ms": 8690.65,
+        "wav_bytes": 322604,
+        "wav_path": "E:\\CubismDemo\\PY\\logs\\experiment_tts_pipeline\\20260519_231356\\exp4\\exp4_seg_001.wav",
+        "ok": true,
+        "error": ""
+      },
+      {
+        "index": 2,
+        "text": "这样不仅能够帮助你释放内心的情感，同时也能让对方感受到你的尊重与珍惜。",
+        "chars": 35,
+        "segment_ready_ms": 8690.73,
+        "mimo_ms": 2328.48,
+        "cumulative_since_start_ms": 11024.55,
+        "wav_bytes": 299564,
+        "wav_path": "E:\\CubismDemo\\PY\\logs\\experiment_tts_pipeline\\20260519_231356\\exp4\\exp4_seg_002.wav",
+        "ok": true,
+        "error": ""
+      }
+    ],
+    "started_at": "2026-05-19T15:13:56.805782+00:00"
+  },
+  "tts_emotion_default": "悲伤"
+}

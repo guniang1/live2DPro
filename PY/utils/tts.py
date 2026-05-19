@@ -1,4 +1,5 @@
-"""语音合成：默认 GPT-SoVITS 本地 HTTP；可选小米 MiMo TTS（``TTS_PROVIDER=mimo``）。
+"""语音合成：默认小米 MiMo 云端（``TTS_PROVIDER=mimo``）；可改 GPT-SoVITS 本地 HTTP。
+``TTS_OPTIONAL=1`` 时允许无密钥/无参考音时仅文本；默认 **必有朗读**（见 ``tts_required``）。
 
 MiMo V2.5：预置音色（``mimo-v2.5-tts``）与 **音频样本复刻**（``mimo-v2.5-tts-voiceclone``，
 ``audio.voice`` 为 ``data:audio/*;base64,...``）见官方说明
@@ -47,15 +48,68 @@ def tts_debug_enabled() -> bool:
 
 
 def normalized_tts_provider() -> str:
-    """``gpt_sovits``（默认）或 ``mimo``（小米 MiMo 云端）。"""
-    p = (os.getenv("TTS_PROVIDER") or "gpt_sovits").strip().lower()
+    """``mimo``（默认）或 ``gpt_sovits``（本地 GPT-SoVITS）。"""
+    p = (os.getenv("TTS_PROVIDER") or "mimo").strip().lower()
     if p in ("mimo", "xiaomi_mimo", "mimo_v2", "mimo-v2", "xiaomimimo"):
         return "mimo"
     return "gpt_sovits"
 
 
+def tts_optional_mode() -> bool:
+    """``TTS_OPTIONAL=1``：允许无 MiMo 密钥且无 GPT 参考音时仅文本（旧行为）。"""
+    v = (os.getenv("TTS_OPTIONAL") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def tts_required() -> bool:
+    """默认 True：主对话与关怀均应尝试下发朗读。"""
+    return not tts_optional_mode()
+
+
 def mimo_tts_configured() -> bool:
     return bool((os.getenv("MIMO_API_KEY") or "").strip())
+
+
+def gpt_sovits_refer_ready(refer_runtime: dict | None) -> bool:
+    if not refer_runtime:
+        return False
+    return bool(
+        refer_runtime.get("refer_wav_path")
+        and refer_runtime.get("prompt_text")
+        and refer_runtime.get("prompt_language")
+    )
+
+
+def chat_merged_stream_enabled(refer_runtime: dict | None) -> bool:
+    """本连接是否走 ``/ws/chat`` 合并流 ``chunk_audio`` + WAV。"""
+    p = normalized_tts_provider()
+    if p == "mimo":
+        return mimo_tts_configured()
+    if gpt_sovits_refer_ready(refer_runtime):
+        return True
+    return mimo_tts_configured()
+
+
+def effective_chat_tts_provider(refer_runtime: dict | None) -> str:
+    """实际用于主对话合成的引擎（GPT 参考不齐时可回退 MiMo）。"""
+    p = normalized_tts_provider()
+    if p == "mimo":
+        return "mimo"
+    if gpt_sovits_refer_ready(refer_runtime):
+        return "gpt_sovits"
+    if mimo_tts_configured():
+        return "mimo"
+    return "gpt_sovits"
+
+
+def tts_unavailable_reason(refer_runtime: dict | None) -> str | None:
+    if chat_merged_stream_enabled(refer_runtime):
+        return None
+    if normalized_tts_provider() == "mimo":
+        return "朗读为必选项，但未配置 MIMO_API_KEY，请在 PY/.env 中设置"
+    return (
+        "朗读为必选项，但未配置 MIMO_API_KEY，且当前模型包未绑定 GPT-SoVITS 参考音频"
+    )
 
 
 def _mimo_resolve_voice_sample_path(refer_runtime: dict | None) -> str | None:
@@ -399,11 +453,54 @@ def _encode_mimo_voice_sample_file_cached(path: str) -> str:
     return out
 
 
+_MIMO_PRESET_VOICES: frozenset[str] = frozenset(
+    {
+        "mimo_default",
+        "冰糖",
+        "茉莉",
+        "苏打",
+        "白桦",
+        "Mia",
+        "Chloe",
+        "Milo",
+        "Dean",
+    }
+)
+
+# 历史占位名 / 简写 → 官方预置音色（见 MiMo API Param Incorrect 提示）
+_MIMO_VOICE_ALIASES: dict[str, str] = {
+    "default": "mimo_default",
+    "default_zh": "mimo_default",
+    "default_en": "Mia",
+    "zh": "冰糖",
+    "chinese": "冰糖",
+    "en": "Mia",
+    "english": "Mia",
+}
+
+
 def _mimo_preset_voice_id(text_language: str) -> str:
-    """V2.5 预置音色名（如 ``冰糖`` / ``Mia``）；可用 ``MIMO_TTS_VOICE`` 覆盖。"""
+    """V2.5 预置音色名（如 ``mimo_default`` / ``冰糖`` / ``Mia``）；可用 ``MIMO_TTS_VOICE`` 覆盖。"""
     explicit = (os.getenv("MIMO_TTS_VOICE") or "").strip()
     if explicit:
-        return explicit
+        alias = _MIMO_VOICE_ALIASES.get(explicit.lower())
+        if alias:
+            if alias != explicit:
+                logger.info(
+                    "MiMo：MIMO_TTS_VOICE=%s 已映射为官方音色 %s",
+                    explicit,
+                    alias,
+                )
+            return alias
+        if explicit in _MIMO_PRESET_VOICES:
+            return explicit
+        logger.warning(
+            "MiMo：未知预置音色 MIMO_TTS_VOICE=%s，回退 mimo_default；"
+            "可用：%s",
+            explicit,
+            ", ".join(sorted(_MIMO_PRESET_VOICES)),
+        )
+        return "mimo_default"
     lang = (text_language or "zh").strip().lower()
     if lang.startswith("en") or lang == "english":
         return "Mia"
@@ -463,8 +560,12 @@ def mimo_tts(
 
     **预置音色**：``mimo-v2.5-tts``（默认），``audio.voice`` 为音色名（如 ``冰糖``）。
 
-    **音色克隆**：模型固定为 ``mimo-v2.5-tts-voiceclone``（官方当前唯一支持）。
+    **导演策略（线上默认）**：``router/wschat`` 传入的 ``user_director_prompt`` 为【人设】【语气】
+    短导演（TTS 实验五 **5b**）；不采用回合前情感分析 + 动态标签（实验五 **5a**）。见 ``docs/后端项目正文.md`` 附录 J。
+
+    **音色克隆**：有本地参考音时模型为 ``mimo-v2.5-tts-voiceclone``（或 ``MIMO_TTS_MODEL`` 含 voiceclone）。
     ``audio.voice`` 为 ``data:audio/wav;base64,...`` 或 ``data:audio/mpeg;base64,...``，
+    无参考音时**不报错**，自动改用 ``mimo-v2.5-tts`` + 预置音色（``MIMO_TTS_VOICE`` 或按语言默认）。
     样本仅 **wav/mp3**，编码前 ≤10MB。可在 **user** 消息中传入自然语言风格指令（可为空字符串）；
     待合成文本在 **assistant**。鉴权默认请求头 ``api-key``（与官方 Curl 一致），可选
     ``MIMO_USE_BEARER_AUTH=1`` 改用 ``Authorization: Bearer``。
@@ -532,14 +633,18 @@ def mimo_tts(
         voice_field: str = _encode_mimo_voice_sample_file_cached(sample_path)
         voice_log = f"clone:{sample_path}"
     else:
-        model = model_env or "mimo-v2.5-tts"
-        if "voiceclone" in model_env.lower():
-            raise RuntimeError(
-                "MIMO_TTS_MODEL 为音色克隆模型，但未找到本地参考音频："
-                "请在上传页绑定 wav/mp3，或设置 MIMO_VOICE_SAMPLE_PATH"
+        if model_env and "voiceclone" in model_env.lower():
+            logger.warning(
+                "MiMo：MIMO_TTS_MODEL=%s 但未找到参考音频（上传页绑定或 MIMO_VOICE_SAMPLE_PATH），"
+                "回退预置音色模型 %s",
+                model_env,
+                "mimo-v2.5-tts",
             )
+            model = "mimo-v2.5-tts"
+        else:
+            model = model_env or "mimo-v2.5-tts"
         voice_field = _mimo_preset_voice_id(text_language)
-        voice_log = voice_field
+        voice_log = f"preset:{voice_field}"
 
     style = (os.getenv("MIMO_TTS_STYLE") or "").strip()
     text_one_line = _mimo_flatten_content_for_api(text)
@@ -754,7 +859,8 @@ def _iter_tokens(text: str) -> Generator[str, None, None]:
             yield tk
 
 
-_SENTENCE_PUNC = {"。", "！", "？", ".", "!", "?", ";", "；"}
+# 句末标点：流式 punc 模式遇此即 flush；逗号/顿号/分号等中间停顿号不触发
+_SENTENCE_END_PUNC = {"。", "！", "？", ".", "!", "?"}
 
 
 def _iter_chunk_by_tokens(text: str, chunk_tokens: int = 5) -> Generator[str, None, None]:
@@ -930,12 +1036,12 @@ def llm_to_tts_stream(
         for tk in _iter_tokens(content):
             token_bucket.append(tk)
             if flush_mode == "punc":
-                should_flush = tk in _SENTENCE_PUNC
+                should_flush = tk in _SENTENCE_END_PUNC
             elif flush_mode == "token":
                 should_flush = len(token_bucket) >= chunk_tokens
             else:
-                # mixed: 达到 token 阈值或遇到断句标点任一即出块
-                should_flush = len(token_bucket) >= chunk_tokens or tk in _SENTENCE_PUNC
+                # mixed: 达到 token 阈值或遇到句末标点任一即出块
+                should_flush = len(token_bucket) >= chunk_tokens or tk in _SENTENCE_END_PUNC
             if should_flush:
                 item = _flush_bucket()
                 if item is not None:

@@ -1,0 +1,86 @@
+{
+  "meta": {
+    "created_at": "2026-05-19T15:07:24.125047+00:00",
+    "dry_run": false,
+    "ollama_host": "http://127.0.0.1:11434",
+    "ollama_model": "qwen2.5:3b",
+    "min_chars": 1,
+    "flush_mode": "sentence_end",
+    "mimo_configured": true,
+    "voice_sample": "E:\\CubismDemo\\PY\\assets\\打电话了我没接到抱歉姐姐我现在下去接你.wav",
+    "mimo_preset_only": false
+  },
+  "experiment_1": null,
+  "experiment_2": null,
+  "experiment_3": {
+    "experiment": 3,
+    "question": "我今天很难过。",
+    "model": "qwen2.5:3b",
+    "min_chars": 1,
+    "tts_emotion": "悲伤",
+    "mimo_director_prompt": "请用「悲伤」的语气朗读下面这句，情绪要自然、连贯。",
+    "llm_mood_hint": "悲伤",
+    "ok": true,
+    "error": "",
+    "llm_first_token_ms": 4326.075300006778,
+    "llm_complete_ms": 5545.141800001147,
+    "answer_text": "听到你今天感觉如此，我感到非常难过和理解。生活中总有那么些时刻会让人觉得沉重和悲伤，这都是正常的。如果你愿意，我们可以好好谈谈让你难过的事情，或许能一起找到一点慰藉。记住，无论何时何地，你的感受都是值得被理解和重视的。",
+    "answer_chars": 109,
+    "segment_count": 4,
+    "total_mimo_ms": 11503.13,
+    "time_to_first_audio_ms": 9864.1,
+    "wall_clock_ms": 18137.12,
+    "segments": [
+      {
+        "index": 1,
+        "text": "听到你今天感觉如此，我感到非常难过和理解。",
+        "chars": 21,
+        "segment_ready_ms": 6614.66,
+        "mimo_ms": 3243.52,
+        "cumulative_since_start_ms": 9864.1,
+        "wav_bytes": 453164,
+        "wav_path": "E:\\CubismDemo\\PY\\logs\\experiment_tts_pipeline\\20260519_230724\\exp3\\exp3_seg_001.wav",
+        "ok": true,
+        "error": ""
+      },
+      {
+        "index": 2,
+        "text": "生活中总有那么些时刻会让人觉得沉重和悲伤，这都是正常的。",
+        "chars": 28,
+        "segment_ready_ms": 9864.12,
+        "mimo_ms": 2733.04,
+        "cumulative_since_start_ms": 12598.28,
+        "wav_bytes": 407084,
+        "wav_path": "E:\\CubismDemo\\PY\\logs\\experiment_tts_pipeline\\20260519_230724\\exp3\\exp3_seg_002.wav",
+        "ok": true,
+        "error": ""
+      },
+      {
+        "index": 3,
+        "text": "如果你愿意，我们可以好好谈谈让你难过的事情，或许能一起找到一点慰藉。",
+        "chars": 34,
+        "segment_ready_ms": 12598.29,
+        "mimo_ms": 2769.06,
+        "cumulative_since_start_ms": 15373.47,
+        "wav_bytes": 422444,
+        "wav_path": "E:\\CubismDemo\\PY\\logs\\experiment_tts_pipeline\\20260519_230724\\exp3\\exp3_seg_003.wav",
+        "ok": true,
+        "error": ""
+      },
+      {
+        "index": 4,
+        "text": "记住，无论何时何地，你的感受都是值得被理解和重视的。",
+        "chars": 26,
+        "segment_ready_ms": 15373.49,
+        "mimo_ms": 2757.51,
+        "cumulative_since_start_ms": 18137.1,
+        "wav_bytes": 414764,
+        "wav_path": "E:\\CubismDemo\\PY\\logs\\experiment_tts_pipeline\\20260519_230724\\exp3\\exp3_seg_004.wav",
+        "ok": true,
+        "error": ""
+      }
+    ],
+    "started_at": "2026-05-19T15:07:24.125071+00:00"
+  },
+  "tts_emotion_default": "悲伤"
+}

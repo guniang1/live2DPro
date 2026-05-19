@@ -20,8 +20,8 @@ import re
 import sys
 from pathlib import Path
 
-# 与 wschat._SENTENCE_PUNC 保持一致
-_SENTENCE_PUNC = {"。", "！", "？", ".", "!", "?", ";", "；", "，", ","}
+# 与 wschat._SENTENCE_END_PUNC 保持一致（仅句末；逗号/顿号/分号不触发）
+_SENTENCE_END_PUNC = {"。", "！", "？", ".", "!", "?"}
 
 
 def iter_tokens(text: str) -> list[str]:
@@ -29,52 +29,74 @@ def iter_tokens(text: str) -> list[str]:
     return re.findall(pattern, text)
 
 
+def _split_tokens_prefix_by_max_chars(
+    tokens: list[str], max_chars: int
+) -> tuple[str, list[str]]:
+    if not tokens:
+        return "", []
+    acc: list[str] = []
+    n = 0
+    cut = 0
+    for i, tk in enumerate(tokens):
+        if acc and n + len(tk) > max_chars:
+            break
+        acc.append(tk)
+        n += len(tk)
+        cut = i + 1
+    if not acc:
+        acc = [tokens[0]]
+        cut = 1
+    return "".join(acc).strip(), tokens[cut:]
+
+
 def simulate_flush(
     stream_chunks: list[str],
     *,
     every_n_end: int,
     min_chars: int,
-    max_tok: int | None,
+    max_chars: int = 200,
 ) -> list[str]:
-    """按 wschat 阶段 3 的规则，从若干流式 chunk 累加 token，返回依次送入 TTS 的句子列表。"""
+    """按 wschat punctuation 模式：句末即 flush；超 max_chars 强制切。"""
     every_n_end = max(1, min(200, every_n_end))
     min_chars = max(1, min(200, min_chars))
+    max_chars = max(20, min(2000, max_chars))
 
     text_buffer: list[str] = []
     tts_sentence_end_punc_count = 0
     flushed: list[str] = []
 
-    def flush_tail() -> None:
-        nonlocal text_buffer, tts_sentence_end_punc_count
-        sentence = "".join(text_buffer).strip()
-        if sentence:
-            flushed.append(sentence)
-        text_buffer.clear()
-        tts_sentence_end_punc_count = 0
-
     for content in stream_chunks:
         for tk in iter_tokens(content):
             text_buffer.append(tk)
-            if tk in _SENTENCE_PUNC:
+            if tk in _SENTENCE_END_PUNC:
                 tts_sentence_end_punc_count += 1
-            flush_by_tok = max_tok is not None and len(text_buffer) >= max_tok
+
+            while text_buffer:
+                raw = "".join(text_buffer)
+                if not raw.strip():
+                    text_buffer.clear()
+                    break
+                if len(raw) > max_chars:
+                    seg, rest = _split_tokens_prefix_by_max_chars(
+                        text_buffer, max_chars
+                    )
+                    if not seg:
+                        break
+                    del text_buffer[:]
+                    text_buffer.extend(rest)
+                    tts_sentence_end_punc_count = 0
+                    flushed.append(seg)
+                    continue
+                break
 
             if every_n_end <= 1:
-                flush_by_punc = tk in _SENTENCE_PUNC
-                if not flush_by_punc and not flush_by_tok:
+                if tk not in _SENTENCE_END_PUNC:
                     continue
                 sentence = "".join(text_buffer).strip()
-                if not sentence:
-                    continue
-                if (
-                    flush_by_punc
-                    and not flush_by_tok
-                    and len(sentence) < min_chars
-                ):
+                if not sentence or len(sentence) < min_chars:
                     continue
             else:
-                flush_by_batch = tts_sentence_end_punc_count >= every_n_end
-                if not flush_by_batch and not flush_by_tok:
+                if tts_sentence_end_punc_count < every_n_end:
                     continue
                 sentence = "".join(text_buffer).strip()
                 if not sentence:
@@ -84,8 +106,19 @@ def simulate_flush(
             tts_sentence_end_punc_count = 0
             flushed.append(sentence)
 
-    if text_buffer:
-        flush_tail()
+    while text_buffer:
+        raw = "".join(text_buffer)
+        if not raw.strip():
+            text_buffer.clear()
+            break
+        if len(raw) > max_chars:
+            seg, rest = _split_tokens_prefix_by_max_chars(text_buffer, max_chars)
+            del text_buffer[:]
+            text_buffer.extend(rest)
+            flushed.append(seg)
+        else:
+            text_buffer.clear()
+            flushed.append(raw.strip())
 
     return flushed
 
@@ -160,14 +193,14 @@ def main() -> int:
     parser.add_argument(
         "--min-chars",
         type=int,
-        default=8,
-        help="对应 TTS_MIN_CHARS_PER_CHUNK：遇标点但不足此字数则继续攒（默认 8，与 wschat 一致）",
+        default=1,
+        help="对应 TTS_MIN_CHARS_PER_CHUNK：遇句末标点但不足此字数则继续攒（默认 1，与 wschat 一致）",
     )
     parser.add_argument(
-        "--max-tok",
+        "--max-chars",
         type=int,
-        default=0,
-        help="对应 TTS_MAX_TOKENS_WITHOUT_PUNC；0 表示不启用按字数强制切",
+        default=200,
+        help="对应 TTS_MAX_CHARS_PER_CHUNK：超此字数强制切段（默认 200）",
     )
     parser.add_argument("--latency-base-ms", type=float, default=300.0)
     parser.add_argument("--latency-per-char-ms", type=float, default=12.0)
@@ -178,29 +211,25 @@ def main() -> int:
     else:
         text = DEFAULT_SAMPLE
 
-    max_tok: int | None = None
-    if args.max_tok > 0:
-        max_tok = max(4, args.max_tok)
-
     stream = chunks_simulating_stream(text, chunk_size=args.chunk_size)
 
     a = simulate_flush(
         stream,
         every_n_end=1,
         min_chars=args.min_chars,
-        max_tok=max_tok,
+        max_chars=args.max_chars,
     )
     b = simulate_flush(
         stream,
         every_n_end=3,
         min_chars=args.min_chars,
-        max_tok=max_tok,
+        max_chars=args.max_chars,
     )
 
     print(
-        "流式分句 → TTS 切块对比（规则对齐 wschat：句末标点集 + min_chars + every_n_end）\n"
+        "流式分句 → TTS 切块对比（规则对齐 wschat：句末标点 + max_chars + every_n_end）\n"
         f"模拟流式: chunk_size={args.chunk_size}, min_chars={args.min_chars}, "
-        f"max_tok={max_tok}"
+        f"max_chars={args.max_chars}"
     )
 
     summarize(

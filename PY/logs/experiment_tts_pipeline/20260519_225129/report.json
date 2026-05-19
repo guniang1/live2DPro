@@ -1,0 +1,69 @@
+{
+  "meta": {
+    "created_at": "2026-05-19T14:51:29.300642+00:00",
+    "dry_run": false,
+    "ollama_host": "http://127.0.0.1:11434",
+    "ollama_model": "qwen2.5:3b",
+    "min_chars": 1,
+    "flush_mode": "sentence_end",
+    "mimo_configured": true,
+    "voice_sample": "E:\\CubismDemo\\PY\\assets\\打电话了我没接到抱歉姐姐我现在下去接你.wav",
+    "mimo_preset_only": false
+  },
+  "experiment_1": null,
+  "experiment_2": {
+    "experiment": 2,
+    "question": "用三句话介绍你自己。",
+    "model": "qwen2.5:3b",
+    "min_chars": 1,
+    "ok": true,
+    "error": "",
+    "llm_first_token_ms": 481.62930000398774,
+    "llm_complete_ms": 1692.0554999960586,
+    "answer_text": "我是Qwen，一个由阿里云开发的 AI 助手，旨在提供信息、陪伴聊天和帮助用户解决各种问题。我可以回答问题、创作文字，还能与你一起娱乐和玩耍。无论你需要了解什么知识或是简单的对话交流，我都在这里为你服务。",
+    "answer_chars": 102,
+    "segment_count": 3,
+    "total_mimo_ms": 7493.03,
+    "time_to_first_audio_ms": 6056.36,
+    "wall_clock_ms": 10341.46,
+    "segments": [
+      {
+        "index": 1,
+        "text": "我是Qwen，一个由阿里云开发的AI助手，旨在提供信息、陪伴聊天和帮助用户解决各种问题。",
+        "chars": 44,
+        "segment_ready_ms": 2840.13,
+        "mimo_ms": 3210.18,
+        "cumulative_since_start_ms": 6056.36,
+        "wav_bytes": 391724,
+        "wav_path": "E:\\CubismDemo\\PY\\logs\\experiment_tts_pipeline\\20260519_225129\\exp2\\exp2_seg_001.wav",
+        "ok": true,
+        "error": ""
+      },
+      {
+        "index": 2,
+        "text": "我可以回答问题、创作文字，还能与你一起娱乐和玩耍。",
+        "chars": 25,
+        "segment_ready_ms": 6056.38,
+        "mimo_ms": 2126.57,
+        "cumulative_since_start_ms": 8183.67,
+        "wav_bytes": 230444,
+        "wav_path": "E:\\CubismDemo\\PY\\logs\\experiment_tts_pipeline\\20260519_225129\\exp2\\exp2_seg_002.wav",
+        "ok": true,
+        "error": ""
+      },
+      {
+        "index": 3,
+        "text": "无论你需要了解什么知识或是简单的对话交流，我都在这里为你服务。",
+        "chars": 31,
+        "segment_ready_ms": 8183.68,
+        "mimo_ms": 2156.28,
+        "cumulative_since_start_ms": 10341.43,
+        "wav_bytes": 291884,
+        "wav_path": "E:\\CubismDemo\\PY\\logs\\experiment_tts_pipeline\\20260519_225129\\exp2\\exp2_seg_003.wav",
+        "ok": true,
+        "error": ""
+      }
+    ],
+    "started_at": "2026-05-19T14:51:29.300674+00:00"
+  }
+}
