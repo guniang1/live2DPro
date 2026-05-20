@@ -4,8 +4,8 @@
 
 1. 从 ``chat_session`` **增量**取材（``create_time > last_consolidate_time``，且落在 24h 滑动窗内）；
 2. 改写成叙述性一段 → LLM 写 **本窗增量摘要**（``【时间】人物、事件；`` 条目，约 4～8 条）；
-3. 与库内已有 ``period_overview`` **LLM 滚动合并**（同格式条目列表，替换写入，禁止 ``────────────`` 堆叠）；
-4. 若检测到历史堆叠或超长，可仅对旧文做一次性压缩。
+3. 与库内已有 ``period_overview`` **LLM 滚动合并**（同格式条目列表，替换写入）；
+4. 若概要超长，可仅对旧文做一次性压缩。
 
 稳定用户信息由 ``user_profile`` 维护；本模块只保留**近期对话脉络**。
 ``OLLAMA_MODEL`` / ``OLLAMA_HOST`` 与聊天共用。后台轮询见 ``LONG_MEMORY_SCAN_POLL_INTERVAL_SEC``。
@@ -51,8 +51,9 @@ _PERIOD_OVERVIEW_MAX_CHARS = 4000  # 单次 LLM 产出上限
 _PERIOD_OVERVIEW_REPAIR_PREDICT = 1024
 _PERIOD_OVERVIEW_EXPAND_PREDICT = 1536
 _PERIOD_OVERVIEW_MERGE_PREDICT = 1536
-_STACKED_OVERVIEW_SEPARATOR = "────────────"
 _SUBSTANCE_RAW_MIN_CHARS = 80
+# 旧版 period_overview 曾用长横线分隔多段，读取时剥除
+_LEGACY_OVERVIEW_SEP_RE = re.compile(r"-{10,}")
 
 # period_overview 入库格式：每条「【时间】人物、事件；」；时间为公历年月日 + 上午/下午
 _PERIOD_OVERVIEW_FORMAT_RULE = (
@@ -106,30 +107,19 @@ def _expand_enabled() -> bool:
     )
 
 
-def _compact_on_stacked_enabled() -> bool:
-    return os.getenv("LONG_MEMORY_COMPACT_ON_STACKED", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
-
-
-def _overview_is_stacked(text: str) -> bool:
+def _sanitize_existing_overview(text: str) -> str:
+    """剥除旧版长横线分段标记，避免残留分隔符进入合并/压缩。"""
     t = (text or "").strip()
     if not t:
-        return False
-    if _STACKED_OVERVIEW_SEPARATOR in t:
-        return True
-    return t.count("\n\n") >= 4 and len(t) > 1200
+        return ""
+    t = _LEGACY_OVERVIEW_SEP_RE.sub("\n", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
 
 
 def _overview_needs_compact(existing: str) -> bool:
-    t = (existing or "").strip()
+    t = _sanitize_existing_overview(existing)
     if not t:
         return False
-    if _compact_on_stacked_enabled() and _overview_is_stacked(t):
-        return True
     return len(t) > _long_memory_db_max_chars()
 # 调试日志：chat_session 逐条预览与 LLM 正文截断
 _CHAT_SESSION_LOG_SNIPPET = 160  # user_input / ai_reply 单行预览上限
@@ -269,7 +259,7 @@ def _build_period_overview_prompt(recount: str) -> str:
         + "\n\n**优先写**：进行中话题、未完结故事线、最近重要事件或情绪。\n"
         + "**省略或合并**：称呼/长期偏好/固定人设（系统另有用户画像表）；纯寒暄。\n"
         + "若有大段故事：每条只写主题与关键走向，**禁止**全文复述。\n"
-        + f"**禁止**：对读者提问、分隔符「{_STACKED_OVERVIEW_SEPARATOR}」。只输出条目正文。\n"
+        + "**禁止**：对读者提问、多段堆叠、散文段落。只输出条目正文。\n"
     )
 
 
@@ -285,7 +275,7 @@ def _build_period_overview_strict_retry_prompt(recount: str, bad_output: str) ->
         + "\n\n下面仍是同一段存档材料的**摘要去噪摘录**（全文更长）：\n"
         + excerpt
         + "\n\n请重写：**只写本窗增量存档条目**（4～8 条，格式【时间】人物、事件；）。"
-        "突出进行中话题；不要对读者提问。禁止散文段落、markdown 与分隔符堆叠。\n"
+        "突出进行中话题；不要对读者提问。禁止散文段落、markdown 与多段堆叠。\n"
         + _PERIOD_OVERVIEW_FORMAT_RULE
         + "\n"
     )
@@ -304,23 +294,23 @@ def _build_period_overview_merge_prompt(existing: str, delta: str) -> str:
         + "保留：进行中话题、未完结约定、最近重要事件。\n"
         + "删除：已结束寒暄、重复条目、已在用户画像中的称呼/长期偏好。\n"
         + _PERIOD_OVERVIEW_FORMAT_RULE
-        + f"\n**禁止**：分隔符「{_STACKED_OVERVIEW_SEPARATOR}」、散文段落、JSON、markdown、对读者提问。\n"
+        + "\n**禁止**：散文段落、JSON、markdown、对读者提问、多段堆叠。\n"
         + "只输出合并后的条目正文。\n"
     )
 
 
-def _build_period_overview_compact_prompt(stacked_text: str) -> str:
-    raw = (stacked_text or "").strip()
+def _build_period_overview_compact_prompt(overview_text: str) -> str:
+    raw = _sanitize_existing_overview(overview_text)
     if len(raw) > 14000:
         raw = raw[:7000] + "\n\n…（中间已省略）…\n\n" + raw[-7000:]
     return (
-        "======== 【待压缩的多段堆积概要】 ========\n"
+        "======== 【待压缩的超长概要】 ========\n"
         + raw
         + "\n\n======== 【任务】========\n"
-        + "上文可能由多次摘要用分隔符或散文拼接而成。请压成 **6～12 条**【时间】人物、事件；。\n"
+        + "上文过长或条目过多。请压成 **6～12 条**【时间】人物、事件；。\n"
         + "保留未完结话题与最近事件；删重复与过时寒暄。\n"
         + _PERIOD_OVERVIEW_FORMAT_RULE
-        + f"\n禁止「{_STACKED_OVERVIEW_SEPARATOR}」、JSON、markdown。只输出条目正文。\n"
+        + "\n禁止 JSON、markdown、散文段落。只输出条目正文。\n"
     )
 
 
@@ -498,15 +488,15 @@ def _merge_overviews_via_llm(
     return _truncate_period_overview_for_db(_truncate_period_overview(merged))
 
 
-def _compact_stacked_overview_via_llm(
+def _compact_overview_via_llm(
     ollama_cli: ollama.Client,
     model: str,
-    stacked_text: str,
+    overview_text: str,
     *,
     user_id: int,
     package_key: str,
 ) -> str:
-    raw = (stacked_text or "").strip()
+    raw = _sanitize_existing_overview(overview_text)
     if not raw:
         return ""
     prompt = _build_period_overview_compact_prompt(raw)
@@ -519,7 +509,7 @@ def _compact_stacked_overview_via_llm(
         )
     except Exception:
         logger.exception(
-            "长期记忆堆积压缩 LLM 失败 user_id=%s pkg=%s",
+            "长期记忆超长压缩 LLM 失败 user_id=%s pkg=%s",
             user_id,
             package_key,
         )
@@ -678,7 +668,7 @@ def consolidate_one(
 ) -> bool:
     """对单用户、单逻辑包执行一次周期概要更新；成功返回 True。
 
-    增量取材 → 本窗摘要 → 与已有概要滚动合并（或仅压缩历史堆叠）。
+    增量取材 → 本窗摘要 → 与已有概要滚动合并（或仅压缩超长概要）。
     """
     now = datetime.now()
     window_start = now - timedelta(seconds=_SOURCE_WINDOW_SEC)
@@ -696,7 +686,9 @@ def consolidate_one(
     existing_overview = ""
     since_exclusive: Optional[datetime] = None
     if existing_rec is not None:
-        existing_overview = str(getattr(existing_rec, "period_overview", "") or "").strip()
+        existing_overview = _sanitize_existing_overview(
+            str(getattr(existing_rec, "period_overview", "") or "")
+        )
         since_exclusive = getattr(existing_rec, "last_consolidate_time", None)
         if since_exclusive is not None:
             logger.info(
@@ -734,12 +726,12 @@ def consolidate_one(
 
     if not rows and needs_compact:
         logger.info(
-            "长期记忆仅压缩堆积概要 user_id=%s pkg=%s len=%s",
+            "长期记忆仅压缩超长概要 user_id=%s pkg=%s len=%s",
             user_id,
             package_key_norm,
             len(existing_overview),
         )
-        compacted = _compact_stacked_overview_via_llm(
+        compacted = _compact_overview_via_llm(
             ollama_cli,
             model,
             existing_overview,
@@ -763,7 +755,7 @@ def consolidate_one(
                 _mem.write_long_memory_text(redis_cli, user_id, package_key_norm, merged_txt)
             except Exception:
                 logger.exception("长期记忆写 Redis 失败 user_id=%s pkg=%s", user_id, package_key_norm)
-        logger.info("长期记忆堆积压缩完成 user_id=%s pkg=%s", user_id, package_key_norm)
+        logger.info("长期记忆超长压缩完成 user_id=%s pkg=%s", user_id, package_key_norm)
         return True
 
     recount_full = _merge_chat_sessions_to_narrative_string(rows)
@@ -897,11 +889,11 @@ def consolidate_one(
     work_existing = existing_overview
     if needs_compact and work_existing:
         logger.info(
-            "合并前先压缩堆积概要 user_id=%s pkg=%s",
+            "合并前先压缩超长概要 user_id=%s pkg=%s",
             user_id,
             package_key_norm,
         )
-        work_existing = _compact_stacked_overview_via_llm(
+        work_existing = _compact_overview_via_llm(
             ollama_cli,
             model,
             work_existing,

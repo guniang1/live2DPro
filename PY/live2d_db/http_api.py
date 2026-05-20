@@ -804,7 +804,7 @@ async def long_memories_consolidate_now(
         description="当前模型包键，与聊天一致；省略则按 default",
     ),
 ) -> LongMemoryConsolidateNowPublic:
-    """立即执行一轮周期概要滚动合并（写入 long_memory.period_overview），不受后台 24h 最短间隔限制；可压缩历史堆叠段。"""
+    """立即执行一轮周期概要滚动合并（写入 long_memory.period_overview），不受后台 24h 最短间隔限制；可压缩超长概要。"""
     from live2d_db.long_memory_consolidator import consolidate_one
 
     pkg_norm = _normalize_package_key((package_key or "").strip() or "default", fallback="default")
