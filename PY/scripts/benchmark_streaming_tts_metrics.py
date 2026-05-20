@@ -17,7 +17,7 @@
     python scripts/benchmark_streaming_tts_metrics.py --text-file story.txt --json
     python scripts/benchmark_streaming_tts_metrics.py --live-mimo --max-segments 2
 
-与 ``scripts/compare_streaming_tts_flush.py`` 的关系：本脚本默认 **every_n_end 含 4**
+与 ``scripts/compare_streaming_tts_flush.py`` 的关系：本脚本默认对比 **every_n_end 1（线上默认）与 4（降频参考）**
 （与 wschat 未设置 env 时一致），并补充 **并行调度** 与 **payload** 估算。
 """
 
@@ -321,7 +321,7 @@ def main() -> int:
         type=int,
         nargs="+",
         default=[1, 4],
-        help="对比多种攒批标点阈值（默认 1 与 4，对齐 wschat 默认 4）",
+        help="对比多种攒批标点阈值（默认 1 与 4；1 对齐 wschat 未配 env）",
     )
     ap.add_argument("--latency-base-ms", type=float, default=2800.0, help="单段固定开销（贴近克隆首次 RTT）")
     ap.add_argument("--latency-per-char-ms", type=float, default=8.0, help="按字线性增量（经验系数，可调）")

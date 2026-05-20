@@ -79,6 +79,7 @@ from .http_schemas import (
     PersonaUpdate,
     RemindTriggerCreate,
     RemindTriggerPublic,
+    IdleChitchatTriggerNowPublic,
     RemindSchedulerScanNowPublic,
     RemindTriggerUpdate,
     UserCreate,
@@ -1166,6 +1167,34 @@ async def remind_triggers_scan_now() -> RemindSchedulerScanNowPublic:
             detail=f"定时关怀扫描超时（{int(sec)}s），请检查 Ollama / MiMo 是否正常或减少单次待投递条数",
         ) from None
     return RemindSchedulerScanNowPublic(ok=True, **stats)
+
+
+@router.post(
+    "/remind-triggers/trigger-idle-chitchat",
+    response_model=IdleChitchatTriggerNowPublic,
+)
+async def remind_triggers_trigger_idle_chitchat(
+    user_id: int = Query(..., ge=1, description="当前登录用户 user_id"),
+) -> IdleChitchatTriggerNowPublic:
+    """联调：立即对指定用户推送一轮空闲随机闲聊（不等 5 分钟空闲；需 /ws/chat 在线）。"""
+    from live2d_db.remind_trigger_scheduler import force_idle_chitchat_for_user
+
+    sec = float(os.getenv("REMIND_IDLE_CHITCHAT_HTTP_TIMEOUT_SEC", "180"))
+    try:
+        result = await asyncio.wait_for(
+            force_idle_chitchat_for_user(user_id), timeout=sec
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "POST /remind-triggers/trigger-idle-chitchat 超时（%.0fs） user_id=%s",
+            sec,
+            user_id,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=f"空闲闲聊投递超时（{int(sec)}s），请检查 Ollama / MiMo 与 WebSocket 是否在线",
+        ) from None
+    return IdleChitchatTriggerNowPublic(**result)
 
 
 @router.get("/remind-triggers/{trigger_id}", response_model=RemindTriggerPublic)

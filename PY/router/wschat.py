@@ -228,11 +228,11 @@ async def _deliver_remind_trigger_on_websocket(
         provider = normalized_tts_provider()
 
         if provider == "mimo" and mimo_tts_configured():
-            _inc_dir = _mimo_ws_include_director_enabled()
+            _inc_dir = mimo_ws_include_director_enabled()
             mimo_director_user_prompt = ""
             if _inc_dir:
                 mimo_director_user_prompt = await asyncio.to_thread(
-                    _mimo_director_user_prompt_sync,
+                    mimo_director_user_prompt_sync,
                     user_id,
                     pkg,
                     "",
@@ -572,13 +572,13 @@ def _mimo_tts_use_emotion_analyze_enabled() -> bool:
 
     实验五（``experiment_tts_pipeline``）结论：**默认关闭**。开启会增加约数秒级墙钟，
     首段音频与全流程均慢于【人设】【语气】短导演（5b），且听感平稳性无优势。
-    线上 ``wschat`` 仅使用 ``_mimo_director_user_prompt_sync``（5b），不读本开关。
+    线上 ``wschat`` 仅使用 ``mimo_director_user_prompt_sync``（5b），不读本开关。
     """
     raw = (os.getenv("MIMO_TTS_USE_EMOTION_ANALYZE") or "").strip().lower()
     return raw in ("1", "true", "yes", "on")
 
 
-def _mimo_ws_include_director_enabled() -> bool:
+def mimo_ws_include_director_enabled() -> bool:
     """MiMo 合并流默认附带导演（仅人设 ``character_desc`` + ``tone_style``，实验五 5b）。
 
     仅当 ``MIMO_TTS_WS_INCLUDE_DIRECTOR`` 显式为 0/false/off 时关闭。
@@ -595,7 +595,7 @@ def _mimo_ws_include_director_enabled() -> bool:
     return s in ("1", "true", "yes", "on")
 
 
-def _mimo_ws_tts_single_shot_enabled() -> bool:
+def mimo_ws_tts_single_shot_enabled() -> bool:
     """合并朗读模式下，若开启则等 LLM 全文结束后再调一次 MiMo（默认关闭，仍按句分段）。
 
     音色克隆每次请求都会带上大块参考音频；分段合成会重复上传多次，总耗时与超时概率明显上升。
@@ -726,7 +726,7 @@ def _tts_stream_pipeline_slots() -> int | None:
     return max(1, min(8, n))
 
 
-def _effective_tts_pipeline_workers() -> int:
+def effective_tts_pipeline_workers() -> int:
     slots = _tts_stream_pipeline_slots()
     if slots is not None:
         return slots
@@ -855,6 +855,14 @@ _DEFAULT_CHAT_ROLE_ANCHOR = (
 _DEFAULT_CHAT_REPLY_LENGTH_HINT = (
     "\n\n请用 1～3 句话、以角色口吻直接回答，"
     "不要自问自答、不要重复用户原话、不要编造未发生的对话轮次。"
+    "涉及动画/影视/歌曲等客观信息时，只依据最近对话与用户本轮明示内容作答；"
+    "不确定时说明不确定，禁止张冠李戴到其它作品。"
+)
+_DEFAULT_CHAT_TOPIC_CONTINUITY_RULES = (
+    "【话题延续与指代】\n"
+    "· 单独一条【当前用户问题】时，若用户省略主语或使用「这个/那个/主题曲/片尾曲/什么来着」等指代，"
+    "必须先结合【三种记忆】中「最高优先级：最近对话」还原所指作品/人物/事件，再作答。\n"
+    "· 近期摘要或长期脉络与最近对话话题不一致时，以最近对话为准，勿用旧话题或画像里的其它作品名顶替。"
 )
 _DEFAULT_CHAT_IDENTITY_RULES = (
     "【身份与称呼】\n"
@@ -884,6 +892,118 @@ def _chat_identity_rules() -> str:
     if raw is None:
         return _DEFAULT_CHAT_IDENTITY_RULES
     return raw.strip()
+
+
+def _chat_topic_continuity_rules() -> str:
+    raw = os.getenv("CHAT_TOPIC_CONTINUITY_RULES")
+    if raw is None:
+        return _DEFAULT_CHAT_TOPIC_CONTINUITY_RULES
+    return raw.strip()
+
+
+# 本轮 user 较短且像承接上文的追问时，在 user 尾追加一句绑定提示（可被 CHAT_FOLLOW_UP_HINT=0 关闭）
+_FOLLOW_UP_USER_PATTERNS = re.compile(
+    r"(什么来着|主题曲|片尾曲|片头曲|插曲|那个|这首|刚才|上面说的|还记得|叫什么|是谁的)"
+)
+
+
+def _chat_follow_up_user_hint(user_message: str) -> str:
+    if os.getenv("CHAT_FOLLOW_UP_HINT", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        return ""
+    um = (user_message or "").strip()
+    if not um or len(um) > 48:
+        return ""
+    if not _FOLLOW_UP_USER_PATTERNS.search(um):
+        return ""
+    return (
+        "\n\n（本轮问题可能承接上文：请结合 system 内「最高优先级：最近对话」"
+        "理解所指作品/话题后再答，勿切换到无关作品。）"
+    )
+
+
+_TOPIC_SKIP_USER = re.compile(
+    r"^(不是|不对|错了|嗯+|哦+|好[的呀]?|行|可以|谢谢|哈哈|呵呵|没事).*$"
+)
+_TOPIC_META_USER = re.compile(
+    r"(我喜欢|爱看|最近在看|在看|听过|动漫歌曲|什么动漫|哪部动画)"
+)
+_TOPIC_DENY_USER = re.compile(r"^(不是|不对|错了)")
+
+
+def _extract_topic_anchor_from_turns(
+    instant_turns: list[dict[str, str]],
+    current_user_message: str,
+) -> str:
+    """从本轮与瞬时 user 发言中提取最近话题锚点（作品名等），不采信 assistant 文本。"""
+    cur = (current_user_message or "").strip()
+    m = re.search(r"《([^》]{1,30})》", cur)
+    if m:
+        return m.group(1).strip()
+    if (
+        cur
+        and 2 <= len(cur) <= 20
+        and not _FOLLOW_UP_USER_PATTERNS.search(cur)
+        and not _TOPIC_SKIP_USER.match(cur)
+        and not _TOPIC_META_USER.search(cur)
+    ):
+        return cur
+
+    for t in reversed(instant_turns or []):
+        u = (t.get("u") or "").strip()
+        if not u or _TOPIC_SKIP_USER.match(u):
+            continue
+        for title in re.findall(r"《([^》]{1,30})》", u):
+            if title.strip():
+                return title.strip()
+        if _TOPIC_META_USER.search(u):
+            continue
+        if _FOLLOW_UP_USER_PATTERNS.search(u) and len(u) < 32:
+            continue
+        if 2 <= len(u) <= 20:
+            return u
+    return ""
+
+
+def _enrich_user_message_for_chat(
+    user_message: str,
+    instant_turns: list[dict[str, str]] | None,
+) -> str:
+    """追问时绑定用户侧话题锚点，并提示勿复述助手历史中的错误客观事实。"""
+    if os.getenv("CHAT_TOPIC_BIND", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        return (user_message or "").strip()
+    um = (user_message or "").strip()
+    if not um:
+        return um
+    anchor = _extract_topic_anchor_from_turns(instant_turns or [], um)
+    body = um
+    tail: list[str] = []
+
+    if anchor and _FOLLOW_UP_USER_PATTERNS.search(um):
+        if anchor not in um:
+            body = f"关于「{anchor}」：{um}"
+        tail.append(
+            f"（话题锚点：{anchor}。只围绕该作品/话题作答；"
+            "曲名等客观信息不确定时请说明记不清，禁止编造或切换到其它作品名。"
+            "最近对话里助手曾提到的作品/曲名若与本锚点不符，一律不得采信。）"
+        )
+    if _TOPIC_DENY_USER.match(um):
+        tail.append(
+            "（用户否定了上轮助手说法：勿重复助手历史中的错误事实，以用户侧最近发言为准。）"
+        )
+
+    if not tail:
+        return body
+    return body + "\n\n" + "\n".join(tail)
 
 
 def _chat_prompt_trim_enabled() -> bool:
@@ -928,14 +1048,22 @@ def _assemble_main_chat_system_content(
     identity = _chat_identity_rules()
     if identity:
         head.append(identity)
+    topic = _chat_topic_continuity_rules()
+    if topic:
+        head.append(topic)
     if head:
         return "\n\n".join(head) + "\n\n" + body
     return body
 
 
-def _estimate_chat_user_message_chars(user_message: str) -> int:
-    um = (user_message or "").strip()
-    return len(f"【当前用户问题】\n{um}{_chat_reply_length_hint()}")
+def _estimate_chat_user_message_chars(
+    user_message: str,
+    instant_turns: list[dict[str, str]] | None = None,
+) -> int:
+    um = _enrich_user_message_for_chat(user_message, instant_turns)
+    return len(
+        f"【当前用户问题】\n{um}{_chat_reply_length_hint()}{_chat_follow_up_user_hint(um)}"
+    )
 
 
 def _format_instant_turns_plain(instant_turns: list[dict[str, str]]) -> str:
@@ -977,7 +1105,7 @@ def _build_and_trim_main_chat_system(
         return _sys(), inst, trim_steps
 
     budget = _chat_prompt_max_chars()
-    user_len = _estimate_chat_user_message_chars(user_message)
+    user_len = _estimate_chat_user_message_chars(user_message, inst)
     max_sys = max(800, budget - user_len)
     sys_content = _sys()
     if len(sys_content) <= max_sys:
@@ -1084,7 +1212,9 @@ def _format_three_memories_block(
     instant_s = _format_instant_turns_plain(instant_turns)
     return (
         "【三种记忆】\n"
-        "若以下信息冲突，以优先级从高到低为准：最近对话 > 近期摘要 > 长期脉络。\n\n"
+        "若以下信息冲突，以优先级从高到低为准：最近对话 > 近期摘要 > 长期脉络。\n"
+        "理解【当前用户问题】时，若用户省略主语（如只问「主题曲是什么」），"
+        "须先从下方「最高优先级：最近对话」还原所指作品/人物后再作答。\n\n"
         f"【最高优先级：最近对话】\n{instant_s}\n\n"
         f"【高优先级：近期摘要】\n{short_s}\n\n"
         f"【低优先级：长期脉络】\n{long_s}"
@@ -1128,7 +1258,7 @@ def _mimo_director_role_guide_text(persona_role: str, persona_tone: str) -> str:
     return "\n\n".join(blocks).strip()
 
 
-def _mimo_director_user_prompt_sync(
+def mimo_director_user_prompt_sync(
     user_id: int,
     package_key: str,
     _current_user_message: str,
@@ -1332,7 +1462,7 @@ def _log_wschat_memory_snapshot(
         )
 
 
-def _build_memory_for_model(
+def build_memory_for_model(
     user_id: int,
     package_key: str,
     *,
@@ -1621,7 +1751,7 @@ def ollama_chat_messages(
     scene_location: str = "",
     scene_time: str = "",
 ) -> list[dict]:
-    """system 首条由 ``history_messages``（通常来自 ``_build_memory_for_model``）或兜底模板提供；末尾仅【当前用户问题】。（Live2D 标签由独立模型负责。）"""
+    """system 首条由 ``history_messages``（通常来自 ``build_memory_for_model``）或兜底模板提供；末尾仅【当前用户问题】。（Live2D 标签由独立模型负责。）"""
     sys_content = (
         _chat_system_prompt_for_session(
             user_id,
@@ -1640,7 +1770,8 @@ def ollama_chat_messages(
         msgs = [{"role": "system", "content": sys_content}, *msgs]
     um = (user_message or "").strip()
     hint = _chat_reply_length_hint()
-    msgs.append({"role": "user", "content": f"【当前用户问题】\n{um}{hint}"})
+    follow = _chat_follow_up_user_hint(um)
+    msgs.append({"role": "user", "content": f"【当前用户问题】\n{um}{hint}{follow}"})
     return msgs
 
 
@@ -1925,14 +2056,13 @@ def _resolve_motion_from_raw(mr: str, cat) -> str:
     return mo
 
 
-def _format_resolved_live2d_tag_line(kind: str, raw: str, cat) -> str | None:
-    if kind == "emotion":
-        r = _resolve_emotion_from_raw(raw, cat)
-        return f"{LIVE2D_EMOTION_TAG}{r}" if r else None
-    if kind == "motion":
-        r = _resolve_motion_from_raw(raw, cat)
-        return f"{LIVE2D_MOTION_TAG}{r}" if r else None
-    return None
+def _live2d_tags_ws_payload(*, emotion: str = "", motion: str = "") -> dict:
+    """WebSocket 下行：catalog 规范化后的表情/动作标识名（空串表示本轮无该项）。"""
+    return {
+        "type": "live2d_tags",
+        "emotion": emotion or "",
+        "motion": motion or "",
+    }
 
 
 def _parse_live2d_tag_lines_from_llm_output(text: str) -> tuple[str, str]:
@@ -1950,7 +2080,7 @@ def _parse_live2d_tag_lines_from_llm_output(text: str) -> tuple[str, str]:
     return emo_raw, mot_raw
 
 
-async def _emit_live2d_tags_parallel_llm(
+async def emit_live2d_tags_parallel_llm(
     *,
     websocket: WebSocket,
     chat_session: str,
@@ -2010,16 +2140,16 @@ async def _emit_live2d_tags_parallel_llm(
         return
     if websocket.client_state != WebSocketState.CONNECTED:
         return
-    for kind, raw_val in (("emotion", emo_raw), ("motion", mot_raw)):
-        line = _format_resolved_live2d_tag_line(kind, raw_val, catalog)
-        if not line:
-            continue
-        ok = await _try_send_json(
-            websocket,
-            {"type": "live2d_tags", "text": line},
-        )
-        if ok:
-            sent_flag["sent"] = True
+    ex = _resolve_emotion_from_raw(emo_raw, catalog)
+    mo = _resolve_motion_from_raw(mot_raw, catalog)
+    if not ex and not mo:
+        return
+    ok = await _try_send_json(
+        websocket,
+        _live2d_tags_ws_payload(emotion=ex, motion=mo),
+    )
+    if ok:
+        sent_flag["sent"] = True
 
 
 def _chunk_json(content: str) -> dict:
@@ -2042,7 +2172,7 @@ WebSocket 聊天接口
 响应格式：
     - 连接后首条：{"type": "catalog", "package_key": "...", "expression": [...], "motion": [...],
       "expression_paths": [...], "motion_paths": [...]}（各一条，与 LLM 可选范围一致）
-    - 流式正文（未配置音色参考时）：主对话模型 **不**输出 ``#emotion#`` / ``#motion#``；若流中偶发出现标签行仍会被剥离（防御性）。专用标签模型（``OLLAMA_LIVE2D_TAGS_MODEL``，未设则同 ``OLLAMA_MODEL``）另请求一次，仅输出两行标签，解析后以 ``{"type":"live2d_tags","text":"#emotion#…"}`` / ``#motion#…`` 下发（catalog 规范化后标识名），**不阻塞**主流式与 TTS。
+    - 流式正文（未配置音色参考时）：主对话模型 **不**输出 ``#emotion#`` / ``#motion#``；若流中偶发出现标签行仍会被剥离（防御性）。专用标签模型（``OLLAMA_LIVE2D_TAGS_MODEL``，未设则同 ``OLLAMA_MODEL``）另请求一次，仅输出两行标签，解析后以 ``{"type":"live2d_tags","emotion":"…","motion":"…"}`` 下发（catalog 规范化后标识名；无资源侧为空串），**不阻塞**主流式与 TTS。
     - 流式内容（``TTS_PROVIDER=mimo`` 且已配置 ``MIMO_API_KEY``，或已配置 GPT-SoVITS 参考音频时）：按 **句末标点**（。！？. ! ?，``TTS_FLUSH_EVERY_N_SENTENCE_END`` 默认 1=遇一句末即合成；逗号/分号不触发）下发 ``{"type":"chunk_audio",...}``，**紧接**一条二进制 WAV；单段超过 ``TTS_MAX_CHARS_PER_CHUNK``（默认 200）时在 token 边界强制切段。**正文与 TTS 不等待** Live2D 标签行（标签在流中靠后到达时单独 ``live2d_tags`` 推送）。**流水线**：攒满一段即入队，**不等待**该段合成结束即可继续收 token 攒下一段；并行合成路数由 ``TTS_STREAM_PIPELINE_SLOTS``（优先）或 ``TTS_PARALLEL_WORKERS`` / ``TTS_PARALLEL_WORKERS_MIMO`` 决定，前端仍 **按 segment index 递增** 收音频。MiMo 音色克隆可按批重复上传参考音频；若希望整轮只请求一次云端合成，设 ``MIMO_TTS_WS_SINGLE_SHOT=1``（全文结束后单次 ``chunk_audio``）。MiMo 默认附带 **导演指令**（仅 MySQL 人设：``character_desc`` / ``tone_style``，对应【人设】【语气】）；对本路由的 MiMo 调用固定 ``merge_env_user_prompts=True``，故 ``MIMO_TTS_CONTEXT`` / ``MIMO_TTS_USER_PROMPT`` 会在附带导演时一并写入云端 **user**；``MIMO_TTS_WS_INCLUDE_DIRECTOR=0`` 可关导演（此时仅 ``MIMO_TTS_WS_USER_HINT`` 等）。
     - 完成标记：{"type": "done"}
     - 错误信息：{"type": "error", "message": "错误描述"}
@@ -2215,7 +2345,7 @@ async def chat_websocket(websocket: WebSocket):
             # -------------------------------------------------------------------------
             try:
                 history_messages, _ = await asyncio.to_thread(
-                    _build_memory_for_model,
+                    build_memory_for_model,
                     chat_user_id,
                     session_catalog.package_key,
                     scene_location=scene_location,
@@ -2224,15 +2354,15 @@ async def chat_websocket(websocket: WebSocket):
                 )
                 # MiMo 合并流默认附带导演：【人设】【语气】仅人设字段（Redis/MySQL），不含【场景】与通用说明。
                 # 显式 ``MIMO_TTS_WS_INCLUDE_DIRECTOR=0`` 可关闭。
-                _mimo_ws_include_director = _mimo_ws_include_director_enabled()
+                mimo_ws_include_director = mimo_ws_include_director_enabled()
                 mimo_director_user_prompt = ""
                 if (
-                    _mimo_ws_include_director
+                    mimo_ws_include_director
                     and effective_chat_tts_provider(tts_refer_runtime) == "mimo"
                     and mimo_tts_configured()
                 ):
                     mimo_director_user_prompt = await asyncio.to_thread(
-                        _mimo_director_user_prompt_sync,
+                        mimo_director_user_prompt_sync,
                         chat_user_id,
                         session_catalog.package_key,
                         user_message,
@@ -2240,11 +2370,11 @@ async def chat_websocket(websocket: WebSocket):
                         scene_time=scene_time,
                     )
                 merged_stream = chat_merged_stream_enabled(tts_refer_runtime)
-                _effective_tts = effective_chat_tts_provider(tts_refer_runtime)
+                effective_tts = effective_chat_tts_provider(tts_refer_runtime)
                 _mimo_ws_single_shot = (
                     merged_stream
-                    and _ttp == "mimo"
-                    and _mimo_ws_tts_single_shot_enabled()
+                    and effective_tts == "mimo"
+                    and mimo_ws_tts_single_shot_enabled()
                 )
                 ai_reply_chunks: list[str] = []
                 l2d_parallel_state: dict[str, bool] = {"sent": False}
@@ -2252,7 +2382,7 @@ async def chat_websocket(websocket: WebSocket):
                 # 当前运行中的事件循环，供线程 B 通过 run_coroutine_threadsafe 把 put 投递回 A。
                 loop = asyncio.get_running_loop()
                 parallel_live2d_task = asyncio.create_task(
-                    _emit_live2d_tags_parallel_llm(
+                    emit_live2d_tags_parallel_llm(
                         websocket=websocket,
                         chat_session=chat_session,
                         chat_user_id=chat_user_id,
@@ -2272,22 +2402,29 @@ async def chat_websocket(websocket: WebSocket):
 
                 async def _emit_pending_live2d_tags() -> None:
                     nonlocal live2d_tag_frames_sent
+                    emotion = ""
+                    motion = ""
                     for kind, raw in l2d_splitter.pop_pending_raw_tags():
-                        line = _format_resolved_live2d_tag_line(
-                            kind, raw, session_catalog
-                        )
-                        if not line:
-                            continue
-                        if await _chat_stream_invalid():
-                            return
-                        if websocket.client_state != WebSocketState.CONNECTED:
-                            return
-                        ok = await _try_send_json(
-                            websocket,
-                            {"type": "live2d_tags", "text": line},
-                        )
-                        if ok:
-                            live2d_tag_frames_sent += 1
+                        if kind == "emotion":
+                            r = _resolve_emotion_from_raw(raw, session_catalog)
+                            if r:
+                                emotion = r
+                        elif kind == "motion":
+                            r = _resolve_motion_from_raw(raw, session_catalog)
+                            if r:
+                                motion = r
+                    if not emotion and not motion:
+                        return
+                    if await _chat_stream_invalid():
+                        return
+                    if websocket.client_state != WebSocketState.CONNECTED:
+                        return
+                    ok = await _try_send_json(
+                        websocket,
+                        _live2d_tags_ws_payload(emotion=emotion, motion=motion),
+                    )
+                    if ok:
+                        live2d_tag_frames_sent += 1
 
                 async def _send_live2d_fallback_tags_if_needed() -> None:
                     nonlocal live2d_tag_frames_sent
@@ -2298,21 +2435,15 @@ async def chat_websocket(websocket: WebSocket):
                         l2d_splitter.prefix_motion_raw or "",
                         session_catalog,
                     )
-                    lines: list[str] = []
-                    if ex:
-                        lines.append(f"{LIVE2D_EMOTION_TAG}{ex}")
-                    if mo:
-                        lines.append(f"{LIVE2D_MOTION_TAG}{mo}")
-                    if not lines:
+                    if not ex and not mo:
                         return
                     if await _chat_stream_invalid():
                         return
                     if websocket.client_state != WebSocketState.CONNECTED:
                         return
-                    body = "\n".join(lines)
                     ok = await _try_send_json(
                         websocket,
-                        {"type": "live2d_tags", "text": body},
+                        _live2d_tags_ws_payload(emotion=ex, motion=mo),
                     )
                     if ok:
                         live2d_tag_frames_sent += 1
@@ -2369,7 +2500,7 @@ async def chat_websocket(websocket: WebSocket):
 
                 tts_speed = _tts_speed_default()
                 tts_lang = os.getenv("TTS_TEXT_LANGUAGE", "zh")
-                tts_workers_n = _effective_tts_pipeline_workers()
+                tts_workers_n = effective_tts_pipeline_workers()
 
                 text_buffer: list[str] = []
                 tts_sentence_end_punc_count = 0
@@ -2501,7 +2632,7 @@ async def chat_websocket(websocket: WebSocket):
                         if await _chat_stream_invalid():
                             break
                         refer_ok = gpt_sovits_refer_ready(tts_refer_runtime)
-                        _wp = _effective_tts
+                        _wp = effective_tts
                         if _wp == "mimo":
                             if not mimo_tts_configured():
                                 wav = b""
@@ -2524,7 +2655,7 @@ async def chat_websocket(websocket: WebSocket):
                                         refer_runtime=tts_refer_runtime,
                                         user_director_prompt=mimo_director_user_prompt
                                         or None,
-                                        speech_assistant_only=not _mimo_ws_include_director,
+                                        speech_assistant_only=not mimo_ws_include_director,
                                         merge_env_user_prompts=True,
                                     )
                                 except ValueError as _mimo_ve:

@@ -72,6 +72,53 @@ async def run_scan_tick() -> dict[str, int]:
     return stats
 
 
+async def force_idle_chitchat_for_user(user_id: int) -> dict[str, object]:
+    """联调：跳过空闲时长与本轮已推标记，对指定在线用户立即投递随机闲聊。"""
+    from live2d_db.remind_trigger_delivery import deliver_idle_chitchat_to_user
+    from router import wschat
+    from utils.idle_chitchat import idle_chitchat_enabled
+
+    uid = int(user_id)
+    if uid < 1:
+        return {
+            "ok": False,
+            "delivered": False,
+            "outcome": "",
+            "reason": "invalid_user_id",
+        }
+    if not idle_chitchat_enabled():
+        return {
+            "ok": False,
+            "delivered": False,
+            "outcome": "",
+            "reason": "idle_chitchat_disabled",
+        }
+    if uid not in wschat.list_online_chat_user_ids():
+        return {
+            "ok": False,
+            "delivered": False,
+            "outcome": "",
+            "reason": "user_offline",
+        }
+    outcome = await deliver_idle_chitchat_to_user(uid)
+    delivered = outcome == RemindDeliverOutcome.JSON_SENT
+    reason = "" if delivered else outcome.name.lower()
+    if delivered:
+        logger.info("空闲闲聊（手动触发）已推送 user_id=%s", uid)
+    else:
+        logger.info(
+            "空闲闲聊（手动触发）未推送 user_id=%s outcome=%s",
+            uid,
+            outcome.name,
+        )
+    return {
+        "ok": True,
+        "delivered": delivered,
+        "outcome": outcome.name,
+        "reason": reason,
+    }
+
+
 async def _run_idle_chitchat_tick() -> int:
     """在线且超过空闲阈值的用户推送随机话题闲聊。"""
     from live2d_db.remind_trigger_delivery import deliver_idle_chitchat_to_user

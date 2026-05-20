@@ -3,8 +3,8 @@
 流程：
 
 1. 从 ``chat_session`` **增量**取材（``create_time > last_consolidate_time``，且落在 24h 滑动窗内）；
-2. 改写成叙述性一段 → LLM 写 **本窗增量摘要**（5～8 句）；
-3. 与库内已有 ``period_overview`` **LLM 滚动合并为单段**（替换写入，禁止 ``────────────`` 堆叠）；
+2. 改写成叙述性一段 → LLM 写 **本窗增量摘要**（``【时间】人物、事件；`` 条目，约 4～8 条）；
+3. 与库内已有 ``period_overview`` **LLM 滚动合并**（同格式条目列表，替换写入，禁止 ``────────────`` 堆叠）；
 4. 若检测到历史堆叠或超长，可仅对旧文做一次性压缩。
 
 稳定用户信息由 ``user_profile`` 维护；本模块只保留**近期对话脉络**。
@@ -53,6 +53,31 @@ _PERIOD_OVERVIEW_EXPAND_PREDICT = 1536
 _PERIOD_OVERVIEW_MERGE_PREDICT = 1536
 _STACKED_OVERVIEW_SEPARATOR = "────────────"
 _SUBSTANCE_RAW_MIN_CHARS = 80
+
+# period_overview 入库格式：每条「【时间】人物、事件；」；时间为公历年月日 + 上午/下午
+_PERIOD_OVERVIEW_FORMAT_RULE = (
+    "每条严格一行（或多条连写），格式：**【时间】人物、事件；**\n"
+    "- **时间**：**YYYY年M月D日上午** 或 **YYYY年M月D日下午**（24 小时制：0～11 点为上午，12～23 点为下午）。\n"
+    "  优先照抄材料每段前的「【…年…月…日…午】」标注；无标注时据材料语境写最接近的公历日期，**禁止**「最近」「日前」「另一轮」等模糊词。\n"
+    "- **人物**：用户自称/常用称呼，或「用户」「助手/角色」。\n"
+    "- **事件**：一句概括该人在该时聊了什么/做了什么；行末用中文分号「；」。\n"
+    "- **禁止**：连续散文、多轮对话剧本、JSON、markdown、小节标题。"
+)
+_PERIOD_OVERVIEW_FORMAT_EXAMPLE = (
+    "【2026年5月20日下午】文源；讨论《无依之地》并喜爱女主故事线，分享喜爱动漫歌曲尤其《神兵小将》主题曲；\n"
+    "【2026年5月20日下午】助手；正在为 Herness AI 尝试制作有趣的动画介绍；\n"
+    "【2026年5月21日上午】用户；聊到黄昏时分的美好瞬间与音乐带来的温暖感受；"
+)
+
+
+def _format_overview_time_label(dt: Optional[datetime]) -> str:
+    """长期记忆条目时间：``2026年5月21日上午`` / ``…日下午``。"""
+    if dt is None:
+        return ""
+    if not isinstance(dt, datetime):
+        return ""
+    period = "上午" if dt.hour < 12 else "下午"
+    return f"{dt.year}年{dt.month}月{dt.day}日{period}"
 
 
 def _long_memory_db_max_chars() -> int:
@@ -218,27 +243,33 @@ def _long_memory_model() -> str:
 
 _LONG_MEMORY_PLAIN_SYSTEM = (
     "你是后台「对话存档摘要」生成器，不是在跟真人聊天。"
-    "只输出写入数据库用的中文摘要正文；禁止 JSON、markdown、代码围栏。"
-    "用**编者口吻**连贯概括交谈要点即可；**闲聊、寒暄、日常问答**如实收录，不必写成严肃条目。"
-    "「【用户】」「【角色】」**可选**，次数不限，用于分清双方说法即可。"
-    "避免对读者喊话（如「你觉得呢」）；尽量少写纯客套废话（若材料里确有早安寒暄可一笔带过）。"
+    "只输出写入数据库用的中文条目列表；禁止 JSON、markdown、代码围栏。"
+    "每条格式固定为【YYYY年M月D日上午/下午】人物、事件；（分号结尾）。"
+    "闲聊、寒暄、日常问答可各写一条，不必写成连续散文。"
+    "避免对读者喊话（如「你觉得呢」）；纯客套可省略或合并为一条。"
 )
 
 
+def _period_overview_entry_count(text: str) -> int:
+    """统计符合「【时间】…」开头的条目数。"""
+    return len(re.findall(r"【[^】\n]{1,36}】", (text or "").strip()))
+
+
 def _build_period_overview_prompt(recount: str) -> str:
-    """本窗增量摘要：短而聚焦，不写已在用户画像里的稳定事实。"""
+    """本窗增量摘要：【时间】人物、事件；条目，不写已在用户画像里的稳定事实。"""
     return (
         "======== 【材料：本段新增交谈（仅供写摘要，不是与你对话）】 ========\n"
         + recount
         + "\n\n======== 【任务】========\n"
         + "以上是**自上次存档以来**的新增对话改写，不是在跟你实时聊天。\n"
-        + "写 **5～8 句** 中文存档概要，供后续会话接上近期话题。\n\n"
-        + "**优先写**：进行中话题、未完结故事线、最近 1～2 次重要事件或情绪。\n"
-        + "**省略或一句带过**：称呼/长期偏好/固定人设（系统另有用户画像表）；纯寒暄。\n"
-        + "若有大段故事：只写主题、关键设定与角色回应方式，**禁止**全文复述。\n"
-        + "**禁止**：对读者提问、JSON、markdown、代码围栏、小节标题「周期概要」、"
-        f"分隔符「{_STACKED_OVERVIEW_SEPARATOR}」。\n"
-        + "「【用户】」「【角色】」可选用。只输出概要正文。\n"
+        + "请输出 **4～8 条** 存档条目，供后续会话接上近期话题。\n\n"
+        + _PERIOD_OVERVIEW_FORMAT_RULE
+        + "\n\n**格式示例**（禁止照抄内容，仅学结构）：\n"
+        + _PERIOD_OVERVIEW_FORMAT_EXAMPLE
+        + "\n\n**优先写**：进行中话题、未完结故事线、最近重要事件或情绪。\n"
+        + "**省略或合并**：称呼/长期偏好/固定人设（系统另有用户画像表）；纯寒暄。\n"
+        + "若有大段故事：每条只写主题与关键走向，**禁止**全文复述。\n"
+        + f"**禁止**：对读者提问、分隔符「{_STACKED_OVERVIEW_SEPARATOR}」。只输出条目正文。\n"
     )
 
 
@@ -253,8 +284,10 @@ def _build_period_overview_strict_retry_prompt(recount: str, bad_output: str) ->
         + bad
         + "\n\n下面仍是同一段存档材料的**摘要去噪摘录**（全文更长）：\n"
         + excerpt
-        + "\n\n请重写：**只写本窗增量存档概要**（5～8 句，编者叙述，不是对话剧本）。"
-        "突出进行中话题；不要对读者提问。禁止 markdown 与分隔符堆叠。\n"
+        + "\n\n请重写：**只写本窗增量存档条目**（4～8 条，格式【时间】人物、事件；）。"
+        "突出进行中话题；不要对读者提问。禁止散文段落、markdown 与分隔符堆叠。\n"
+        + _PERIOD_OVERVIEW_FORMAT_RULE
+        + "\n"
     )
 
 
@@ -267,11 +300,12 @@ def _build_period_overview_merge_prompt(existing: str, delta: str) -> str:
         + "\n\n======== 【本次新增概要】 ========\n"
         + dl
         + "\n\n======== 【任务】========\n"
-        + "将两段合并为 **一条** 滚动存档概要（**6～10 句** 中文），整体替换旧文写入数据库。\n"
+        + "将两段合并为 **一条** 滚动存档（**6～12 条**，格式【时间】人物、事件；），整体替换旧文。\n"
         + "保留：进行中话题、未完结约定、最近重要事件。\n"
-        + "删除：已结束寒暄、与新增段重复、已在用户画像中的称呼/长期偏好。\n"
-        + f"**禁止**：分隔符「{_STACKED_OVERVIEW_SEPARATOR}」、多段堆叠、JSON、markdown、对读者提问。\n"
-        + "只输出合并后的概要正文。\n"
+        + "删除：已结束寒暄、重复条目、已在用户画像中的称呼/长期偏好。\n"
+        + _PERIOD_OVERVIEW_FORMAT_RULE
+        + f"\n**禁止**：分隔符「{_STACKED_OVERVIEW_SEPARATOR}」、散文段落、JSON、markdown、对读者提问。\n"
+        + "只输出合并后的条目正文。\n"
     )
 
 
@@ -283,9 +317,10 @@ def _build_period_overview_compact_prompt(stacked_text: str) -> str:
         "======== 【待压缩的多段堆积概要】 ========\n"
         + raw
         + "\n\n======== 【任务】========\n"
-        + "上文可能由多次摘要用分隔符拼接而成。请压成 **一条** 6～10 句的近期对话脉络概要。\n"
+        + "上文可能由多次摘要用分隔符或散文拼接而成。请压成 **6～12 条**【时间】人物、事件；。\n"
         + "保留未完结话题与最近事件；删重复与过时寒暄。\n"
-        + f"禁止「{_STACKED_OVERVIEW_SEPARATOR}」、JSON、markdown。只输出正文。\n"
+        + _PERIOD_OVERVIEW_FORMAT_RULE
+        + f"\n禁止「{_STACKED_OVERVIEW_SEPARATOR}」、JSON、markdown。只输出条目正文。\n"
     )
 
 
@@ -358,25 +393,20 @@ def _dialog_window_has_substance(merged_recount: str) -> bool:
     return len(t) >= 200
 
 
-def _period_overview_sentence_ends(text: str) -> int:
-    """粗略统计句末标点数量（用于判断是否一句话糊弄）。"""
-    return len(re.findall(r"[。！？…]", (text or "").strip()))
-
-
 def _period_overview_density_ok(summary: str, recount: str) -> bool:
-    """摘要相对叙述材料不能过短，否则长期记忆里只剩泛泛一句。"""
+    """摘要相对叙述材料不能过短，否则长期记忆里只剩泛泛一条。"""
     s = (summary or "").strip()
     r = (recount or "").strip()
     rl = len(r)
     sl = len(s)
+    entries = _period_overview_entry_count(s)
     if rl < 400:
-        return sl >= 35 and _period_overview_sentence_ends(s) >= 1
-    # 期望字数：随材料变长，封顶避免对小模型苛求过长
-    min_chars = max(140, min(950, rl // 22))
+        return sl >= 30 and entries >= 1
+    min_chars = max(120, min(950, rl // 22))
     if sl < min_chars:
         return False
-    min_sent = 3 if rl < 1200 else (4 if rl < 4000 else 6)
-    return _period_overview_sentence_ends(s) >= min_sent
+    min_entries = 2 if rl < 1200 else (3 if rl < 4000 else 5)
+    return entries >= min_entries
 
 
 def _build_period_overview_expand_prompt(recount: str, skinny_summary: str) -> str:
@@ -391,12 +421,12 @@ def _build_period_overview_expand_prompt(recount: str, skinny_summary: str) -> s
         + "\n\n======== 【完整叙述材料】 ========\n"
         + excerpt
         + "\n\n======== 【任务】========\n"
-        "请重写 **全新的** 存档概要（编者叙述，不是多轮剧本）。要求：\n"
-        "1）写到材料里 **多条线索**：称呼/人设、故事梗概、旅行/太空等话题及角色回应方式；禁止全文复述长篇故事。\n"
-        "2）「【用户】」「【角色】」**可选用**，次数不限。\n"
-        "3）材料很长时 **不少于 10 句**，字数明显多于上一份；不要对读者追问。\n"
-        "4）禁止 markdown。\n"
-        "只输出概要正文。\n"
+        + "请重写 **全新的** 存档条目（【时间】人物、事件；，不是多轮剧本）。要求：\n"
+        + "1）覆盖材料里 **多条线索**（各写一条）：进行中话题、故事梗概、情绪等；禁止全文复述长篇故事。\n"
+        + "2）材料很长时 **不少于 8 条**，字数明显多于上一份；不要对读者追问。\n"
+        + "3）禁止 markdown 与散文段落。\n"
+        + _PERIOD_OVERVIEW_FORMAT_RULE
+        + "\n只输出条目正文。\n"
     )
 
 
@@ -524,10 +554,10 @@ def _repair_period_overview_only(
         "下面是一段 **叙述性的来往经过**（由聊天记录改写而成，**禁止照抄原句**）。\n\n"
         "你上一次写的摘要不合要求，预览如下（请整体重写，禁止改成另一种寒暄）：\n"
         + (rejected_preview[:900] or "（空）")
-        + "\n\n请重新阅读全文，写 **存档摘要**（连贯编者说明；可含寒暄与闲聊，不是多轮问答剧本）。"
+        + "\n\n请重新阅读全文，写 **存档条目**（【时间】人物、事件；，可含寒暄与闲聊，不是多轮问答剧本）。"
         "不要对读摘要的人追问。\n"
-        "「【用户】」「【角色】」可用可不用，次数不限。\n"
-        "不要 JSON、markdown；长篇故事不全文复述，但要多句交代主题与走向。\n\n"
+        + _PERIOD_OVERVIEW_FORMAT_RULE
+        + "\n长篇故事不全文复述，但要用多条条目交代主题与走向。\n\n"
         "======== 【叙述性经过全文】 ========\n"
         + raw
         + "\n\n======== 【再次强调】========\n"
@@ -599,20 +629,22 @@ def _finalize_period_overview(
 def _merge_chat_sessions_to_narrative_string(rows: list[Any]) -> str:
     """把 ``chat_session`` 多轮记录改写成 **一段** 口述式叙述（不按轮次排版、不用聊天记录标记）。
 
-    供下游模型像「听故事」一样把握大意后再写摘要。
+    每段前附 ``【YYYY年M月D日上午/下午】``（来自 ``create_time``），供摘要模型写入同格式条目。
     """
     if not rows:
         return ""
     pieces: list[str] = []
     for r in rows:
+        when = _format_overview_time_label(getattr(r, "create_time", None))
+        head = f"【{when}】" if when else ""
         u = (getattr(r, "user_input", None) or "").strip()
         a = (getattr(r, "ai_reply", None) or "").strip()
         if u and a:
-            pieces.append(f"有人先聊到「{u}」，接着对话里又谈到「{a}」")
+            pieces.append(f"{head}有人先聊到「{u}」，接着对话里又谈到「{a}」")
         elif u:
-            pieces.append(f"谈话里又提到「{u}」")
+            pieces.append(f"{head}谈话里又提到「{u}」")
         elif a:
-            pieces.append(f"另一边说到「{a}」")
+            pieces.append(f"{head}另一边说到「{a}」")
     if not pieces:
         return ""
     return "；".join(pieces) + "。"

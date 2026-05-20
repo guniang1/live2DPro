@@ -3,7 +3,7 @@
 一行 ``long_memory`` 对应一个模型角色 (user_id + package_key)；Redis 缓存合并后的 prompt 片段。
 摘要依据来自表 ``chat_session``。
 
-**产品约定**：LLM **滚动合并** ``period_overview``（单段替换，禁止分隔符堆叠）；稳定用户信息见 ``user_profile``。
+**产品约定**：LLM **滚动合并** ``period_overview``（条目列表替换，禁止分隔符堆叠）；入库正文每条为 **【时间】人物、事件；**，时间为 **YYYY年M月D日上午/下午**（由 ``chat_session.create_time`` 标注）；稳定用户信息见 ``user_profile``。
 注入聊天 system 时仅 ``LONG_MEMORY_DIMENSIONS``（周期概要，超长保留文尾）。
 """
 

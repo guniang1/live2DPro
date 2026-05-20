@@ -279,6 +279,15 @@ class RemindSchedulerScanNowPublic(BaseModel):
     idle_chitchat_delivered: int = 0
 
 
+class IdleChitchatTriggerNowPublic(BaseModel):
+    """联调：强制对指定用户推送一轮空闲随机闲聊（不等空闲时长）。"""
+
+    ok: bool = True
+    delivered: bool = False
+    outcome: str = ""
+    reason: str = ""
+
+
 class OkRows(BaseModel):
     affected_rows: int
 
